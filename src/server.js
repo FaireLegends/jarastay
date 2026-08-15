@@ -1,68 +1,1237 @@
-import express from 'express';
-import pg from 'pg';
-import crypto from 'node:crypto';
-import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import express from "express";
+import pg from "pg";
+import crypto from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const {Pool}=pg;
-const app=express();
-const port=Number(process.env.PORT||3000);
-const pool=new Pool({connectionString:process.env.DATABASE_URL,max:20,idleTimeoutMillis:30000,connectionTimeoutMillis:5000});
-const __dirname=path.dirname(fileURLToPath(import.meta.url));
-const publicDir=path.join(__dirname,'../public');
-const secret=process.env.JWT_SECRET||'dev-only-change-this-secret';
+const { Pool } = pg;
 
-app.disable('x-powered-by');
-app.use((req,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');res.setHeader('Permissions-Policy','camera=(), microphone=(), geolocation=()');res.setHeader('Content-Security-Policy',"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'");next()});
-app.use(express.json({limit:'256kb'}));
-app.use(express.urlencoded({extended:false,limit:'64kb'}));
-app.use((req,res,next)=>{let n=Number(req.app.locals.rate?.get(req.ip)||0)+1;if(!req.app.locals.rate)req.app.locals.rate=new Map();req.app.locals.rate.set(req.ip,n);if(n>300){return res.status(429).json({error:'rate_limit'});}setTimeout(()=>req.app.locals.rate?.delete(req.ip),60000);next()});
-app.use(express.static(publicDir,{extensions:['html'],maxAge:process.env.NODE_ENV==='production'?'1h':0}));
+const app = express();
+const PORT = Number(process.env.PORT || 3000);
 
-const b64=v=>Buffer.from(v).toString('base64url');
-function signToken(payload){const head=b64(JSON.stringify({alg:'HS256',typ:'JWT'}));const body=b64(JSON.stringify({...payload,iat:Math.floor(Date.now()/1000),exp:Math.floor(Date.now()/1000)+86400}));const sig=b64(crypto.createHmac('sha256',secret).update(`${head}.${body}`).digest());return `${head}.${body}.${sig}`}
-function verifyToken(token){try{const [h,p,s]=token.split('.');const expected=b64(crypto.createHmac('sha256',secret).update(`${h}.${p}`).digest());if(!s||!crypto.timingSafeEqual(Buffer.from(s),Buffer.from(expected)))return null;const x=JSON.parse(Buffer.from(p,'base64url'));return x.exp>Date.now()/1000?x:null}catch{return null}}
-function hashPassword(password){const salt=crypto.randomBytes(16);const hash=crypto.scryptSync(password,salt,64);return `scrypt:${salt.toString('hex')}:${hash.toString('hex')}`}
-function checkPassword(password,stored){try{const [,saltHex,hashHex]=stored.split(':');const hash=crypto.scryptSync(password,Buffer.from(saltHex,'hex'),64);return crypto.timingSafeEqual(hash,Buffer.from(hashHex,'hex'))}catch{return false}}
-const clean=(v,max=500)=>String(v??'').trim().slice(0,max);
-const email=v=>clean(v,254).toLowerCase();
-async function q(text,params=[]){return pool.query(text,params)}
-async function audit(req,action,entity,id,metadata={}){if(!req.user)return;await q('INSERT INTO audit_log(organization_id,user_id,action,entity,entity_id,metadata,ip) VALUES($1,$2,$3,$4,$5,$6,$7)',[req.user.org,req.user.id,action,entity,id,metadata,req.ip]).catch(()=>{})}
-function auth(req,res,next){const token=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');const u=verifyToken(token);if(!u)return res.status(401).json({error:'unauthorized'});req.user=u;next()}
-function role(...roles){return (req,res,next)=>roles.includes(req.user.role)?next():res.status(403).json({error:'forbidden'})}
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-app.get('/healthz',async(req,res)=>{try{await q('SELECT 1');res.json({ok:true,service:'jarastay',time:new Date().toISOString()})}catch{res.status(503).json({ok:false})}});
-app.get('/api/public/properties/:slug',async(req,res)=>{const r=await q('SELECT p.id,p.name,p.slug,p.address,p.check_in,p.check_out,rt.id room_type_id,rt.name room_type,rt.description,rt.capacity,rt.base_rate FROM properties p JOIN room_types rt ON rt.property_id=p.id WHERE p.slug=$1 AND p.active=true AND rt.active=true ORDER BY rt.name',[req.params.slug]);if(!r.rowCount)return res.status(404).json({error:'not_found'});res.json({property:r.rows[0]&&{id:r.rows[0].id,name:r.rows[0].name,slug:r.rows[0].slug,address:r.rows[0].address,checkIn:r.rows[0].check_in,checkOut:r.rows[0].check_out},roomTypes:r.rows.map(x=>({id:x.room_type_id,name:x.room_type,description:x.description,capacity:x.capacity,baseRate:Number(x.base_rate)}))})});
+// Como este arquivo está em /src, o public fica em ../public
+const PUBLIC_DIR = path.join(__dirname, "../public");
 
-app.post('/api/auth/register',async(req,res)=>{const name=clean(req.body.name,120),em=email(req.body.email),password=String(req.body.password||'');if(name.length<2||!em.includes('@')||password.length<10)return res.status(400).json({error:'invalid_input'});const slug=(clean(req.body.hotelName,80)||'hotel').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')+'-'+crypto.randomBytes(3).toString('hex');const client=await pool.connect();try{await client.query('BEGIN');const org=(await client.query('INSERT INTO organizations(name,slug) VALUES($1,$2) RETURNING *',[clean(req.body.hotelName,120)||'Meu Hotel',slug])).rows[0];const user=(await client.query('INSERT INTO users(organization_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5) RETURNING id,name,email,role',[org.id,name,em,hashPassword(password),'owner'])).rows[0];const prop=(await client.query('INSERT INTO properties(organization_id,name,slug,address) VALUES($1,$2,$3,$4) RETURNING id,name,slug',[org.id,org.name,slug,JSON.stringify({country:'BR'})])).rows[0];await client.query('COMMIT');const token=signToken({id:user.id,org:org.id,role:user.role,name:user.name,email:user.email});res.status(201).json({token,user,organization:org,property:prop})}catch(e){await client.query('ROLLBACK');res.status(409).json({error:'registration_failed'})}finally{client.release()}});
-app.post('/api/auth/login',async(req,res)=>{const em=email(req.body.email),password=String(req.body.password||'');const r=await q('SELECT id,organization_id,name,email,password_hash,role FROM users WHERE email=$1 AND active=true LIMIT 1',[em]);if(!r.rowCount||!checkPassword(password,r.rows[0].password_hash))return res.status(401).json({error:'invalid_credentials'});const u=r.rows[0];res.json({token:signToken({id:u.id,org:u.organization_id,role:u.role,name:u.name,email:u.email}),user:{id:u.id,name:u.name,email:u.email,role:u.role}})});
-app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
+const DATABASE_URL = process.env.DATABASE_URL;
+const JWT_SECRET =
+  process.env.JWT_SECRET || "jarastay-development-secret-change-me";
 
-app.get('/api/properties',auth,async(req,res)=>{const r=await q('SELECT * FROM properties WHERE organization_id=$1 AND active=true ORDER BY name',[req.user.org]);res.json(r.rows)});
-app.get('/api/dashboard',auth,async(req,res)=>{const p=(await q('SELECT id,name FROM properties WHERE organization_id=$1 AND active=true ORDER BY name LIMIT 1',[req.user.org])).rows[0];if(!p)return res.json({});const [rooms,resv,income,guests,tasks]=await Promise.all([q("SELECT count(*) total,count(*) FILTER(WHERE status='occupied') occupied,count(*) FILTER(WHERE status='available') available,count(*) FILTER(WHERE status='cleaning') cleaning,count(*) FILTER(WHERE status='maintenance') maintenance FROM rooms WHERE property_id=$1 AND active=true",[p.id]),q("SELECT count(*) FILTER(WHERE status NOT IN('cancelled','checked_out','no_show')) active,count(*) FILTER(WHERE check_in=current_date AND status IN('confirmed','hold')) arrivals,count(*) FILTER(WHERE check_out=current_date AND status IN('confirmed','checked_in')) departures,coalesce(sum(total) FILTER(WHERE created_at>=date_trunc('month',now())),0) revenue FROM reservations WHERE property_id=$1",[p.id]),q("SELECT coalesce(sum(amount),0) total FROM ledger_entries WHERE organization_id=$1 AND kind='income' AND occurred_on>=date_trunc('month',current_date)",[req.user.org]),q('SELECT count(*) total FROM guests WHERE organization_id=$1',[req.user.org]),q("SELECT count(*) total,count(*) FILTER(WHERE status='pending') pending FROM housekeeping_tasks WHERE property_id=$1 AND created_at::date=current_date",[p.id])]);const rm=rooms.rows[0],rv=resv.rows[0];res.json({property:p,rooms:{...rm,total:Number(rm.total),occupied:Number(rm.occupied),available:Number(rm.available)},reservations:{active:Number(rv.active),arrivals:Number(rv.arrivals),departures:Number(rv.departures),revenue:Number(rv.revenue)},ledgerIncome:Number(income.rows[0].total),guests:Number(guests.rows[0].total),housekeeping:{total:Number(tasks.rows[0].total),pending:Number(tasks.rows[0].pending)}})});
+if (!DATABASE_URL) {
+  console.error("ERRO: DATABASE_URL não foi configurada.");
+}
 
-app.get('/api/rooms',auth,async(req,res)=>{const r=await q('SELECT r.*,rt.name room_type,rt.capacity,rt.base_rate FROM rooms r JOIN room_types rt ON rt.id=r.room_type_id JOIN properties p ON p.id=r.property_id WHERE p.organization_id=$1 AND r.active=true ORDER BY p.name,r.number',[req.user.org]);res.json(r.rows)});
-app.patch('/api/rooms/:id',auth,async(req,res)=>{const allowed=['available','occupied','cleaning','maintenance','blocked'];const s=clean(req.body.status,30);if(!allowed.includes(s))return res.status(400).json({error:'invalid_status'});const r=await q('UPDATE rooms SET status=$1 WHERE id=$2 AND property_id IN(SELECT id FROM properties WHERE organization_id=$3) RETURNING *',[s,req.params.id,req.user.org]);if(!r.rowCount)return res.status(404).json({error:'not_found'});await audit(req,'room.status','room',req.params.id,{status:s});res.json(r.rows[0])});
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+  ssl: DATABASE_URL?.includes("render.com")
+    ? { rejectUnauthorized: false }
+    : undefined,
+});
 
-app.get('/api/guests',auth,async(req,res)=>{const term=clean(req.query.q,100);const r=await q('SELECT * FROM guests WHERE organization_id=$1 AND ($2="" OR full_name ILIKE $3 OR email ILIKE $3 OR phone ILIKE $3) ORDER BY created_at DESC LIMIT 100',[req.user.org,term,`%${term}%`]);res.json(r.rows)});
-app.post('/api/guests',auth,async(req,res)=>{const name=clean(req.body.fullName,160);if(name.length<2)return res.status(400).json({error:'name_required'});const r=await q('INSERT INTO guests(organization_id,full_name,email,phone,country_code,document_last4,notes,marketing_opt_in) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[req.user.org,name,email(req.body.email)||null,clean(req.body.phone,40)||null,clean(req.body.countryCode,8)||null,clean(req.body.documentLast4,4)||null,clean(req.body.notes,1000),Boolean(req.body.marketingOptIn)]);await audit(req,'guest.create','guest',r.rows[0].id);res.status(201).json(r.rows[0])});
+app.disable("x-powered-by");
 
-app.get('/api/reservations',auth,async(req,res)=>{const r=await q(`SELECT r.*,g.full_name guest_name,rm.number room_number,rt.name room_type FROM reservations r JOIN guests g ON g.id=r.guest_id LEFT JOIN reservation_rooms rr ON rr.reservation_id=r.id LEFT JOIN rooms rm ON rm.id=rr.room_id LEFT JOIN room_types rt ON rt.id=rm.room_type_id JOIN properties p ON p.id=r.property_id WHERE r.organization_id=$1 AND ($2='' OR g.full_name ILIKE $3 OR r.confirmation_code ILIKE $3 OR rm.number ILIKE $3) ORDER BY r.check_in DESC,r.created_at DESC LIMIT 250`,[req.user.org,clean(req.query.q,100),`%${clean(req.query.q,100)}%`]);res.json(r.rows)});
-app.post('/api/reservations',auth,async(req,res)=>{const {propertyId,roomId,guestId,checkIn,checkOut}=req.body;const adults=Math.max(1,Number(req.body.adults||1)),children=Math.max(0,Number(req.body.children||0)),rate=Number(req.body.rate||0),tax=Number(req.body.tax||0);if(!propertyId||!roomId||!guestId||!/^\d{4}-\d{2}-\d{2}$/.test(checkIn||'')||!/^\d{4}-\d{2}-\d{2}$/.test(checkOut||'')||new Date(checkOut)<=new Date(checkIn))return res.status(400).json({error:'invalid_reservation'});const overlap=await q(`SELECT 1 FROM reservation_rooms rr JOIN reservations r ON r.id=rr.reservation_id WHERE rr.room_id=$1 AND r.status NOT IN('cancelled','checked_out','no_show') AND r.check_in < $3 AND r.check_out > $2 LIMIT 1`,[roomId,checkIn,checkOut]);if(overlap.rowCount)return res.status(409).json({error:'room_unavailable'});const code='JS-'+new Date().getFullYear()+'-'+crypto.randomBytes(4).toString('hex').toUpperCase();const total=rate+tax;const client=await pool.connect();try{await client.query('BEGIN');const v=(await client.query(`INSERT INTO reservations(organization_id,property_id,guest_id,confirmation_code,check_in,check_out,adults,children,channel,currency,subtotal,tax,total,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,[req.user.org,propertyId,guestId,code,checkIn,checkOut,adults,children,clean(req.body.channel,30)||'direct','BRL',rate,tax,total,clean(req.body.notes,1000)])).rows[0];await client.query('INSERT INTO reservation_rooms(reservation_id,room_id,rate) VALUES($1,$2,$3)',[v.id,roomId,rate]);await client.query("UPDATE rooms SET status=CASE WHEN status='available' THEN 'available' ELSE status END WHERE id=$1",[roomId]);await client.query('COMMIT');await audit(req,'reservation.create','reservation',v.id,{code});res.status(201).json(v)}catch(e){await client.query('ROLLBACK');res.status(500).json({error:'reservation_failed'})}finally{client.release()}});
-app.patch('/api/reservations/:id/status',auth,async(req,res)=>{const allowed=['hold','confirmed','checked_in','checked_out','cancelled','no_show'];const s=clean(req.body.status,30);if(!allowed.includes(s))return res.status(400).json({error:'invalid_status'});const r=await q('UPDATE reservations SET status=$1 WHERE id=$2 AND organization_id=$3 RETURNING *',[s,req.params.id,req.user.org]);if(!r.rowCount)return res.status(404).json({error:'not_found'});if(s==='cancelled'||s==='checked_out'||s==='no_show'){await q("UPDATE rooms SET status='available' WHERE id=(SELECT room_id FROM reservation_rooms WHERE reservation_id=$1)",[req.params.id])}await audit(req,'reservation.status','reservation',req.params.id,{status:s});res.json(r.rows[0])});
+app.use(express.json({ limit: "256kb" }));
+app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
-app.get('/api/housekeeping',auth,async(req,res)=>{const r=await q("SELECT h.*,rm.number room_number,u.name assignee FROM housekeeping_tasks h LEFT JOIN rooms rm ON rm.id=h.room_id LEFT JOIN users u ON u.id=h.assigned_to JOIN properties p ON p.id=h.property_id WHERE p.organization_id=$1 ORDER BY h.created_at DESC LIMIT 250",[req.user.org]);res.json(r.rows)});
-app.post('/api/housekeeping',auth,async(req,res)=>{const r=await q('INSERT INTO housekeeping_tasks(property_id,room_id,type,priority,notes) SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT 1 FROM properties WHERE id=$1 AND organization_id=$6) RETURNING *',[req.body.propertyId,req.body.roomId||null,clean(req.body.type,30)||'cleaning',clean(req.body.priority,20)||'normal',clean(req.body.notes,1000),req.user.org]);if(!r.rowCount)return res.status(400).json({error:'invalid_property'});res.status(201).json(r.rows[0])});
-app.patch('/api/housekeeping/:id',auth,async(req,res)=>{const status=clean(req.body.status,30);const r=await q("UPDATE housekeeping_tasks SET status=$1,completed_at=CASE WHEN $1='completed' THEN now() ELSE NULL END WHERE id=$2 AND property_id IN(SELECT id FROM properties WHERE organization_id=$3) RETURNING *",[status,req.params.id,req.user.org]);if(!r.rowCount)return res.status(404).json({error:'not_found'});res.json(r.rows[0])});
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
 
-app.get('/api/finance/ledger',auth,async(req,res)=>{const r=await q('SELECT * FROM ledger_entries WHERE organization_id=$1 ORDER BY occurred_on DESC,created_at DESC LIMIT 500',[req.user.org]);res.json(r.rows)});
-app.post('/api/finance/ledger',auth,role('owner','admin','manager','finance'),async(req,res)=>{const amount=Number(req.body.amount);if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({error:'invalid_amount'});const r=await q('INSERT INTO ledger_entries(organization_id,property_id,reservation_id,kind,category,description,amount,currency,occurred_on) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[req.user.org,req.body.propertyId||null,req.body.reservationId||null,req.body.kind==='expense'?'expense':'income',clean(req.body.category,80),clean(req.body.description,200),amount,'BRL',req.body.occurredOn||new Date().toISOString().slice(0,10)]);await audit(req,'ledger.create','ledger',r.rows[0].id);res.status(201).json(r.rows[0])});
+app.use(
+  express.static(PUBLIC_DIR, {
+    extensions: ["html"],
+    maxAge: process.env.NODE_ENV === "production" ? "1h" : 0,
+  })
+);
 
-app.get('/api/audit',auth,role('owner','admin'),async(req,res)=>{const r=await q('SELECT id,action,entity,entity_id,metadata,ip,created_at FROM audit_log WHERE organization_id=$1 ORDER BY id DESC LIMIT 500',[req.user.org]);res.json(r.rows)});
-app.get('/api/export/reservations.csv',auth,async(req,res)=>{const r=await q('SELECT confirmation_code,guest_id,check_in,check_out,status,channel,total,currency FROM reservations WHERE organization_id=$1 ORDER BY check_in DESC LIMIT 5000',[req.user.org]);const esc=v=>`"${String(v??'').replaceAll('"','""')}"`;const csv=['confirmation_code,guest_id,check_in,check_out,status,channel,total,currency',...r.rows.map(x=>[x.confirmation_code,x.guest_id,x.check_in,x.check_out,x.status,x.channel,x.total,x.currency].map(esc).join(','))].join('\n');res.setHeader('Content-Type','text/csv; charset=utf-8');res.setHeader('Content-Disposition','attachment; filename="jarastay-reservations.csv"');res.send('\ufeff'+csv)});
+/* =========================================================
+   UTILIDADES
+========================================================= */
 
-app.post('/api/public/booking',async(req,res)=>{const {propertyId,roomId,checkIn,checkOut}=req.body;const client=await pool.connect();try{await client.query('BEGIN');const p=(await client.query('SELECT id,organization_id FROM properties WHERE id=$1 AND active=true',[propertyId])).rows[0];if(!p)throw new Error('property');const overlap=await client.query(`SELECT 1 FROM reservation_rooms rr JOIN reservations r ON r.id=rr.reservation_id WHERE rr.room_id=$1 AND r.status NOT IN('cancelled','checked_out','no_show') AND r.check_in < $3 AND r.check_out > $2 LIMIT 1`,[roomId,checkIn,checkOut]);if(overlap.rowCount){await client.query('ROLLBACK');return res.status(409).json({error:'room_unavailable'})}const g=(await client.query('INSERT INTO guests(organization_id,full_name,email,phone,marketing_opt_in) VALUES($1,$2,$3,$4,$5) RETURNING id',[p.organization_id,clean(req.body.fullName,160),email(req.body.email)||null,clean(req.body.phone,40)||null,Boolean(req.body.marketingOptIn)])).rows[0];const rt=(await client.query('SELECT rt.base_rate FROM rooms rm JOIN room_types rt ON rt.id=rm.room_type_id WHERE rm.id=$1',[roomId])).rows[0];if(!rt)throw new Error('room');const rate=Number(rt.base_rate);const code='WEB-'+crypto.randomBytes(5).toString('hex').toUpperCase();const r=(await client.query(`INSERT INTO reservations(organization_id,property_id,guest_id,confirmation_code,check_in,check_out,adults,children,channel,currency,subtotal,total) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'website','BRL',$9,$9) RETURNING confirmation_code,check_in,check_out,total`,[p.organization_id,p.id,g.id,code,checkIn,checkOut,Number(req.body.adults||1),Number(req.body.children||0),rate])).rows[0];await client.query('INSERT INTO reservation_rooms(reservation_id,room_id,rate) VALUES((SELECT id FROM reservations WHERE confirmation_code=$1),$2,$3)',[code,roomId,rate]);await client.query('COMMIT');res.status(201).json({reservation:r})}catch(e){await client.query('ROLLBACK');res.status(400).json({error:'booking_failed'})}finally{client.release()}});
+function clean(value, max = 500) {
+  return String(value ?? "")
+    .trim()
+    .slice(0, max);
+}
 
-app.get('/{*splat}',(req,res)=>res.sendFile(path.join(publicDir,'index.html')));
-app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'internal_error'})});
-app.listen(port,()=>console.log(`JaraStay listening on :${port}`));
+function normalizeEmail(value) {
+  return clean(value, 254).toLowerCase();
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, 64);
+
+  return [
+    "scrypt",
+    salt.toString("hex"),
+    hash.toString("hex"),
+  ].join(":");
+}
+
+function checkPassword(password, stored) {
+  try {
+    const parts = String(stored).split(":");
+
+    if (parts.length !== 3) {
+      return false;
+    }
+
+    const [, saltHex, hashHex] = parts;
+
+    const salt = Buffer.from(saltHex, "hex");
+    const storedHash = Buffer.from(hashHex, "hex");
+
+    const calculated = crypto.scryptSync(password, salt, 64);
+
+    return crypto.timingSafeEqual(calculated, storedHash);
+  } catch {
+    return false;
+  }
+}
+
+function base64url(value) {
+  return Buffer.from(value).toString("base64url");
+}
+
+function createToken(payload) {
+  const header = base64url(
+    JSON.stringify({
+      alg: "HS256",
+      typ: "JWT",
+    })
+  );
+
+  const now = Math.floor(Date.now() / 1000);
+
+  const body = base64url(
+    JSON.stringify({
+      ...payload,
+      iat: now,
+      exp: now + 60 * 60 * 24 * 7,
+    })
+  );
+
+  const signature = base64url(
+    crypto
+      .createHmac("sha256", JWT_SECRET)
+      .update(`${header}.${body}`)
+      .digest()
+  );
+
+  return `${header}.${body}.${signature}`;
+}
+
+function verifyToken(token) {
+  try {
+    const [header, body, signature] = String(token).split(".");
+
+    if (!header || !body || !signature) {
+      return null;
+    }
+
+    const expected = base64url(
+      crypto
+        .createHmac("sha256", JWT_SECRET)
+        .update(`${header}.${body}`)
+        .digest()
+    );
+
+    const a = Buffer.from(signature);
+    const b = Buffer.from(expected);
+
+    if (a.length !== b.length) {
+      return null;
+    }
+
+    if (!crypto.timingSafeEqual(a, b)) {
+      return null;
+    }
+
+    const payload = JSON.parse(
+      Buffer.from(body, "base64url").toString("utf8")
+    );
+
+    if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function getTokenFromRequest(req) {
+  const header = req.headers.authorization || "";
+
+  if (header.startsWith("Bearer ")) {
+    return header.substring(7);
+  }
+
+  return null;
+}
+
+async function query(text, params = []) {
+  return pool.query(text, params);
+}
+
+/* =========================================================
+   AUTENTICAÇÃO
+========================================================= */
+
+function auth(req, res, next) {
+  const token = getTokenFromRequest(req);
+
+  if (!token) {
+    return res.status(401).json({
+      error: "unauthorized",
+    });
+  }
+
+  const user = verifyToken(token);
+
+  if (!user) {
+    return res.status(401).json({
+      error: "invalid_token",
+    });
+  }
+
+  req.user = user;
+
+  next();
+}
+
+function role(...allowedRoles) {
+  return (req, res, next) => {
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        error: "forbidden",
+      });
+    }
+
+    next();
+  };
+}
+
+/* =========================================================
+   BANCO DE DADOS
+========================================================= */
+
+async function initializeDatabase() {
+  console.log("Verificando banco de dados...");
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS organizations (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id BIGSERIAL PRIMARY KEY,
+      organization_id BIGINT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'owner',
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS properties (
+      id BIGSERIAL PRIMARY KEY,
+      organization_id BIGINT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      address JSONB NOT NULL DEFAULT '{}'::jsonb,
+      check_in TEXT DEFAULT '14:00',
+      check_out TEXT DEFAULT '12:00',
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS room_types (
+      id BIGSERIAL PRIMARY KEY,
+      property_id BIGINT NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      capacity INTEGER NOT NULL DEFAULT 2,
+      base_rate NUMERIC(12,2) NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT TRUE
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS rooms (
+      id BIGSERIAL PRIMARY KEY,
+      property_id BIGINT NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      room_type_id BIGINT NOT NULL REFERENCES room_types(id) ON DELETE CASCADE,
+      number TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'available',
+      active BOOLEAN NOT NULL DEFAULT TRUE
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS guests (
+      id BIGSERIAL PRIMARY KEY,
+      organization_id BIGINT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      full_name TEXT NOT NULL,
+      email TEXT,
+      phone TEXT,
+      country_code TEXT,
+      document_last4 TEXT,
+      notes TEXT DEFAULT '',
+      marketing_opt_in BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS reservations (
+      id BIGSERIAL PRIMARY KEY,
+      organization_id BIGINT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      property_id BIGINT NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      guest_id BIGINT NOT NULL REFERENCES guests(id),
+      confirmation_code TEXT NOT NULL UNIQUE,
+      check_in DATE NOT NULL,
+      check_out DATE NOT NULL,
+      adults INTEGER NOT NULL DEFAULT 1,
+      children INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'confirmed',
+      channel TEXT NOT NULL DEFAULT 'direct',
+      currency TEXT NOT NULL DEFAULT 'BRL',
+      subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
+      tax NUMERIC(12,2) NOT NULL DEFAULT 0,
+      total NUMERIC(12,2) NOT NULL DEFAULT 0,
+      notes TEXT DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS reservation_rooms (
+      id BIGSERIAL PRIMARY KEY,
+      reservation_id BIGINT NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+      room_id BIGINT NOT NULL REFERENCES rooms(id),
+      rate NUMERIC(12,2) NOT NULL DEFAULT 0
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS ledger_entries (
+      id BIGSERIAL PRIMARY KEY,
+      organization_id BIGINT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      property_id BIGINT,
+      reservation_id BIGINT,
+      kind TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      amount NUMERIC(12,2) NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'BRL',
+      occurred_on DATE NOT NULL DEFAULT CURRENT_DATE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS housekeeping_tasks (
+      id BIGSERIAL PRIMARY KEY,
+      property_id BIGINT NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      room_id BIGINT,
+      type TEXT NOT NULL DEFAULT 'cleaning',
+      priority TEXT NOT NULL DEFAULT 'normal',
+      status TEXT NOT NULL DEFAULT 'pending',
+      notes TEXT DEFAULT '',
+      assigned_to BIGINT,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id BIGSERIAL PRIMARY KEY,
+      organization_id BIGINT,
+      user_id BIGINT,
+      action TEXT NOT NULL,
+      entity TEXT,
+      entity_id BIGINT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      ip TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS users_email_idx
+    ON users(email)
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS properties_org_idx
+    ON properties(organization_id)
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS guests_org_idx
+    ON guests(organization_id)
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS reservations_org_idx
+    ON reservations(organization_id)
+  `);
+
+  console.log("Banco de dados pronto.");
+}
+
+/* =========================================================
+   HEALTH
+========================================================= */
+
+app.get("/healthz", async (req, res) => {
+  try {
+    await query("SELECT 1");
+
+    res.json({
+      ok: true,
+      service: "jarastay",
+      database: true,
+      time: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Health error:", error);
+
+    res.status(503).json({
+      ok: false,
+      database: false,
+    });
+  }
+});
+
+/* =========================================================
+   REGISTRO
+========================================================= */
+
+app.post("/api/auth/register", async (req, res) => {
+  const name = clean(req.body.name, 120);
+  const hotelName = clean(req.body.hotelName, 120);
+  const em = normalizeEmail(req.body.email);
+  const password = String(req.body.password || "");
+
+  if (name.length < 2) {
+    return res.status(400).json({
+      error: "name_required",
+      message: "Informe seu nome.",
+    });
+  }
+
+  if (!em.includes("@") || !em.includes(".")) {
+    return res.status(400).json({
+      error: "invalid_email",
+      message: "Informe um e-mail válido.",
+    });
+  }
+
+  if (password.length < 8) {
+    return res.status(400).json({
+      error: "password_too_short",
+      message: "A senha precisa ter pelo menos 8 caracteres.",
+    });
+  }
+
+  const finalHotelName = hotelName || "Meu Hotel";
+
+  const slug =
+    finalHotelName
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") +
+    "-" +
+    crypto.randomBytes(3).toString("hex");
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // Verifica e-mail antes de tentar criar
+    const existing = await client.query(
+      "SELECT id FROM users WHERE email=$1 LIMIT 1",
+      [em]
+    );
+
+    if (existing.rowCount > 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        error: "email_exists",
+        message: "Este e-mail já possui uma conta.",
+      });
+    }
+
+    const organizationResult = await client.query(
+      `
+      INSERT INTO organizations(name, slug)
+      VALUES($1, $2)
+      RETURNING id, name, slug, created_at
+      `,
+      [finalHotelName, slug]
+    );
+
+    const organization = organizationResult.rows[0];
+
+    const passwordHash = hashPassword(password);
+
+    const userResult = await client.query(
+      `
+      INSERT INTO users(
+        organization_id,
+        name,
+        email,
+        password_hash,
+        role
+      )
+      VALUES($1, $2, $3, $4, 'owner')
+      RETURNING id, name, email, role
+      `,
+      [
+        organization.id,
+        name,
+        em,
+        passwordHash,
+      ]
+    );
+
+    const user = userResult.rows[0];
+
+    const propertyResult = await client.query(
+      `
+      INSERT INTO properties(
+        organization_id,
+        name,
+        slug,
+        address
+      )
+      VALUES($1, $2, $3, $4)
+      RETURNING id, name, slug
+      `,
+      [
+        organization.id,
+        finalHotelName,
+        slug,
+        JSON.stringify({
+          country: "BR",
+        }),
+      ]
+    );
+
+    const property = propertyResult.rows[0];
+
+    // Cria estrutura inicial do hotel
+    const roomTypeResult = await client.query(
+      `
+      INSERT INTO room_types(
+        property_id,
+        name,
+        description,
+        capacity,
+        base_rate
+      )
+      VALUES($1, 'Standard', 'Quarto padrão', 2, 0)
+      RETURNING id
+      `,
+      [property.id]
+    );
+
+    await client.query(
+      `
+      INSERT INTO rooms(
+        property_id,
+        room_type_id,
+        number,
+        status
+      )
+      VALUES($1, $2, '101', 'available')
+      `,
+      [
+        property.id,
+        roomTypeResult.rows[0].id,
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    const token = createToken({
+      id: user.id,
+      org: organization.id,
+      role: user.role,
+      name: user.name,
+      email: user.email,
+    });
+
+    console.log(
+      `Nova conta criada: ${user.email} / organização ${organization.name}`
+    );
+
+    return res.status(201).json({
+      success: true,
+      token,
+      user,
+      organization,
+      property,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+
+    console.error("REGISTRATION ERROR:");
+    console.error(error);
+
+    // Agora o frontend receberá uma explicação útil
+    return res.status(500).json({
+      error: "registration_failed",
+      message:
+        process.env.NODE_ENV === "production"
+          ? "Não foi possível criar a conta. Verifique o banco de dados."
+          : error.message,
+      detail:
+        process.env.NODE_ENV === "production"
+          ? undefined
+          : error.detail,
+      code:
+        process.env.NODE_ENV === "production"
+          ? undefined
+          : error.code,
+    });
+  } finally {
+    client.release();
+  }
+});
+
+/* =========================================================
+   LOGIN
+========================================================= */
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const em = normalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+
+    if (!em || !password) {
+      return res.status(400).json({
+        error: "missing_credentials",
+        message: "Informe e-mail e senha.",
+      });
+    }
+
+    const result = await query(
+      `
+      SELECT
+        id,
+        organization_id,
+        name,
+        email,
+        password_hash,
+        role
+      FROM users
+      WHERE email=$1
+        AND active=true
+      LIMIT 1
+      `,
+      [em]
+    );
+
+    if (!result.rowCount) {
+      return res.status(401).json({
+        error: "invalid_credentials",
+        message: "E-mail ou senha incorretos.",
+      });
+    }
+
+    const user = result.rows[0];
+
+    if (!checkPassword(password, user.password_hash)) {
+      return res.status(401).json({
+        error: "invalid_credentials",
+        message: "E-mail ou senha incorretos.",
+      });
+    }
+
+    const token = createToken({
+      id: user.id,
+      org: user.organization_id,
+      role: user.role,
+      name: user.name,
+      email: user.email,
+    });
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("LOGIN ERROR:", error);
+
+    res.status(500).json({
+      error: "login_failed",
+    });
+  }
+});
+
+/* =========================================================
+   USUÁRIO ATUAL
+========================================================= */
+
+app.get("/api/me", auth, async (req, res) => {
+  try {
+    const result = await query(
+      `
+      SELECT
+        u.id,
+        u.name,
+        u.email,
+        u.role,
+        o.id organization_id,
+        o.name organization_name,
+        o.slug organization_slug
+      FROM users u
+      JOIN organizations o
+        ON o.id=u.organization_id
+      WHERE u.id=$1
+      `,
+      [req.user.id]
+    );
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        error: "user_not_found",
+      });
+    }
+
+    res.json({
+      user: result.rows[0],
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "internal_error",
+    });
+  }
+});
+
+/* =========================================================
+   PROPRIEDADES
+========================================================= */
+
+app.get("/api/properties", auth, async (req, res) => {
+  try {
+    const result = await query(
+      `
+      SELECT *
+      FROM properties
+      WHERE organization_id=$1
+        AND active=true
+      ORDER BY name
+      `,
+      [req.user.org]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "properties_failed",
+    });
+  }
+});
+
+/* =========================================================
+   DASHBOARD
+========================================================= */
+
+app.get("/api/dashboard", auth, async (req, res) => {
+  try {
+    const propertyResult = await query(
+      `
+      SELECT id, name
+      FROM properties
+      WHERE organization_id=$1
+        AND active=true
+      ORDER BY name
+      LIMIT 1
+      `,
+      [req.user.org]
+    );
+
+    if (!propertyResult.rowCount) {
+      return res.json({
+        property: null,
+        rooms: {
+          total: 0,
+          occupied: 0,
+          available: 0,
+          cleaning: 0,
+          maintenance: 0,
+        },
+        reservations: {
+          active: 0,
+          arrivals: 0,
+          departures: 0,
+          revenue: 0,
+        },
+        guests: 0,
+        ledgerIncome: 0,
+      });
+    }
+
+    const property = propertyResult.rows[0];
+
+    const rooms = await query(
+      `
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER(
+          WHERE status='occupied'
+        )::int AS occupied,
+        COUNT(*) FILTER(
+          WHERE status='available'
+        )::int AS available,
+        COUNT(*) FILTER(
+          WHERE status='cleaning'
+        )::int AS cleaning,
+        COUNT(*) FILTER(
+          WHERE status='maintenance'
+        )::int AS maintenance
+      FROM rooms
+      WHERE property_id=$1
+        AND active=true
+      `,
+      [property.id]
+    );
+
+    const reservations = await query(
+      `
+      SELECT
+        COUNT(*) FILTER(
+          WHERE status NOT IN(
+            'cancelled',
+            'checked_out',
+            'no_show'
+          )
+        )::int AS active,
+
+        COUNT(*) FILTER(
+          WHERE check_in=CURRENT_DATE
+          AND status IN('confirmed','hold')
+        )::int AS arrivals,
+
+        COUNT(*) FILTER(
+          WHERE check_out=CURRENT_DATE
+          AND status IN('confirmed','checked_in')
+        )::int AS departures,
+
+        COALESCE(
+          SUM(total) FILTER(
+            WHERE created_at >= date_trunc('month', NOW())
+          ),
+          0
+        ) AS revenue
+
+      FROM reservations
+      WHERE property_id=$1
+      `,
+      [property.id]
+    );
+
+    const guests = await query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM guests
+      WHERE organization_id=$1
+      `,
+      [req.user.org]
+    );
+
+    const ledger = await query(
+      `
+      SELECT COALESCE(SUM(amount),0) AS total
+      FROM ledger_entries
+      WHERE organization_id=$1
+        AND kind='income'
+        AND occurred_on >= date_trunc('month', CURRENT_DATE)
+      `,
+      [req.user.org]
+    );
+
+    res.json({
+      property,
+      rooms: rooms.rows[0],
+      reservations: reservations.rows[0],
+      guests: Number(guests.rows[0].total),
+      ledgerIncome: Number(ledger.rows[0].total),
+    });
+  } catch (error) {
+    console.error("DASHBOARD ERROR:", error);
+
+    res.status(500).json({
+      error: "dashboard_failed",
+    });
+  }
+});
+
+/* =========================================================
+   QUARTOS
+========================================================= */
+
+app.get("/api/rooms", auth, async (req, res) => {
+  try {
+    const result = await query(
+      `
+      SELECT
+        r.*,
+        rt.name AS room_type,
+        rt.capacity,
+        rt.base_rate
+      FROM rooms r
+      JOIN room_types rt
+        ON rt.id=r.room_type_id
+      JOIN properties p
+        ON p.id=r.property_id
+      WHERE p.organization_id=$1
+        AND r.active=true
+      ORDER BY p.name, r.number
+      `,
+      [req.user.org]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "rooms_failed",
+    });
+  }
+});
+
+app.patch("/api/rooms/:id", auth, async (req, res) => {
+  try {
+    const allowed = [
+      "available",
+      "occupied",
+      "cleaning",
+      "maintenance",
+      "blocked",
+    ];
+
+    const status = clean(req.body.status, 30);
+
+    if (!allowed.includes(status)) {
+      return res.status(400).json({
+        error: "invalid_status",
+      });
+    }
+
+    const result = await query(
+      `
+      UPDATE rooms
+      SET status=$1
+      WHERE id=$2
+        AND property_id IN(
+          SELECT id
+          FROM properties
+          WHERE organization_id=$3
+        )
+      RETURNING *
+      `,
+      [status, req.params.id, req.user.org]
+    );
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        error: "not_found",
+      });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "room_update_failed",
+    });
+  }
+});
+
+/* =========================================================
+   HÓSPEDES
+========================================================= */
+
+app.get("/api/guests", auth, async (req, res) => {
+  try {
+    const term = clean(req.query.q, 100);
+
+    const result = await query(
+      `
+      SELECT *
+      FROM guests
+      WHERE organization_id=$1
+        AND (
+          $2=''
+          OR full_name ILIKE $3
+          OR email ILIKE $3
+          OR phone ILIKE $3
+        )
+      ORDER BY created_at DESC
+      LIMIT 100
+      `,
+      [
+        req.user.org,
+        term,
+        `%${term}%`,
+      ]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "guests_failed",
+    });
+  }
+});
+
+app.post("/api/guests", auth, async (req, res) => {
+  try {
+    const name = clean(req.body.fullName, 160);
+
+    if (name.length < 2) {
+      return res.status(400).json({
+        error: "name_required",
+      });
+    }
+
+    const result = await query(
+      `
+      INSERT INTO guests(
+        organization_id,
+        full_name,
+        email,
+        phone,
+        country_code,
+        document_last4,
+        notes,
+        marketing_opt_in
+      )
+      VALUES(
+        $1,$2,$3,$4,$5,$6,$7,$8
+      )
+      RETURNING *
+      `,
+      [
+        req.user.org,
+        name,
+        normalizeEmail(req.body.email) || null,
+        clean(req.body.phone, 40) || null,
+        clean(req.body.countryCode, 8) || null,
+        clean(req.body.documentLast4, 4) || null,
+        clean(req.body.notes, 1000),
+        Boolean(req.body.marketingOptIn),
+      ]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "guest_create_failed",
+    });
+  }
+});
+
+/* =========================================================
+   RESERVAS
+========================================================= */
+
+app.get("/api/reservations", auth, async (req, res) => {
+  try {
+    const term = clean(req.query.q, 100);
+
+    const result = await query(
+      `
+      SELECT
+        r.*,
+        g.full_name AS guest_name,
+        rm.number AS room_number,
+        rt.name AS room_type
+      FROM reservations r
+      JOIN guests g
+        ON g.id=r.guest_id
+      LEFT JOIN reservation_rooms rr
+        ON rr.reservation_id=r.id
+      LEFT JOIN rooms rm
+        ON rm.id=rr.room_id
+      LEFT JOIN room_types rt
+        ON rt.id=rm.room_type_id
+      WHERE r.organization_id=$1
+        AND (
+          $2=''
+          OR g.full_name ILIKE $3
+          OR r.confirmation_code ILIKE $3
+          OR rm.number ILIKE $3
+        )
+      ORDER BY r.check_in DESC, r.created_at DESC
+      LIMIT 250
+      `,
+      [
+        req.user.org,
+        term,
+        `%${term}%`,
+      ]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "reservations_failed",
+    });
+  }
+});
+
+/* =========================================================
+   HOUSEKEEPING
+========================================================= */
+
+app.get("/api/housekeeping", auth, async (req, res) => {
+  try {
+    const result = await query(
+      `
+      SELECT
+        h.*,
+        rm.number AS room_number,
+        u.name AS assignee
+      FROM housekeeping_tasks h
+      LEFT JOIN rooms rm
+        ON rm.id=h.room_id
+      LEFT JOIN users u
+        ON u.id=h.assigned_to
+      JOIN properties p
+        ON p.id=h.property_id
+      WHERE p.organization_id=$1
+      ORDER BY h.created_at DESC
+      LIMIT 250
+      `,
+      [req.user.org]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "housekeeping_failed",
+    });
+  }
+});
+
+/* =========================================================
+   FINANCEIRO
+========================================================= */
+
+app.get("/api/finance/ledger", auth, async (req, res) => {
+  try {
+    const result = await query(
+      `
+      SELECT *
+      FROM ledger_entries
+      WHERE organization_id=$1
+      ORDER BY occurred_on DESC, created_at DESC
+      LIMIT 500
+      `,
+      [req.user.org]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "finance_failed",
+    });
+  }
+});
+
+/* =========================================================
+   PÁGINA PRINCIPAL
+========================================================= */
+
+app.get("/{*splat}", (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
+});
+
+/* =========================================================
+   ERROS
+========================================================= */
+
+app.use((err, req, res, next) => {
+  console.error("SERVER ERROR:", err);
+
+  res.status(500).json({
+    error: "internal_error",
+  });
+});
+
+/* =========================================================
+   START
+========================================================= */
+
+async function start() {
+  try {
+    await initializeDatabase();
+
+    await query("SELECT 1");
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`JaraStay online na porta ${PORT}`);
+      console.log(`Public: ${PUBLIC_DIR}`);
+    });
+  } catch (error) {
+    console.error("FALHA AO INICIAR JARASTAY");
+    console.error(error);
+
+    process.exit(1);
+  }
+}
+
+start();
