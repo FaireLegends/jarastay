@@ -1,1640 +1,1712 @@
-const $ = s => document.querySelector(s);
-
-const api = async (url, opt = {}) => {
-  const token = localStorage.getItem('js_token');
-
-  opt.headers = {
-    ...(opt.body ? { 'Content-Type': 'application/json' } : {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(opt.headers || {})
-  };
-
-  const r = await fetch(url, opt);
-
-  if (r.status === 401) {
-    localStorage.removeItem('js_token');
-    location.hash = 'login';
-  }
-
-  const d = await r.json().catch(() => ({}));
-
-  if (!r.ok) {
-    throw new Error(d.error || 'Erro');
-  }
-
-  return d;
-};
-
-const esc = s =>
-  String(s ?? '').replace(/[&<>'"]/g, c => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    "'": '&#39;',
-    '"': '&quot;'
-  }[c]));
-
 /* =========================================================
-   LOGIN
+   JARASTAY - APP.JS
+   Login + Registro + Painel real
 ========================================================= */
 
-function login() {
-  document.querySelector('#app').innerHTML = `
-    <div class="login">
-      <form class="loginbox" id="login">
+(() => {
+  "use strict";
 
-        <div class="logo" style="color:#14202b;margin:0 0 20px">
-          <span class="mark">JS</span>JaraStay
-        </div>
+  const TOKEN_KEY = "jarastay_token";
 
-        <h1>Entrar</h1>
-        <p class="muted">Gestão hoteleira em um só lugar.</p>
+  /* =======================================================
+     UTILIDADES
+  ======================================================= */
 
-        <div class="field">
-          <label>E-MAIL</label>
-          <input
-            id="em"
-            type="email"
-            required
-            autocomplete="username"
-            placeholder="seu@email.com"
-          >
-        </div>
+  const $ = (selector, root = document) =>
+    root.querySelector(selector);
 
-        <div class="field">
-          <label>SENHA</label>
-          <input
-            id="pw"
-            type="password"
-            required
-            autocomplete="current-password"
-            placeholder="Sua senha"
-          >
-        </div>
+  const escapeHtml = value =>
+    String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
 
-        <button class="btn primary" style="width:100%;margin-top:10px">
-          Acessar
-        </button>
+  const money = value =>
+    Number(value || 0).toLocaleString("pt-BR", {
+      style: "currency",
+      currency: "BRL"
+    });
 
-        <p id="err" class="muted"></p>
+  const token = () =>
+    localStorage.getItem(TOKEN_KEY);
 
-        <div style="text-align:center;margin-top:20px">
-          <span class="muted">Ainda não possui uma conta?</span>
-          <button
-            type="button"
-            class="btn"
-            onclick="location.hash='register'"
-            style="margin-top:10px;width:100%"
-          >
-            Criar minha conta
-          </button>
-        </div>
-
-      </form>
-    </div>
-  `;
-
-  $('#login').onsubmit = async e => {
-    e.preventDefault();
-
-    const error = $('#err');
-    error.textContent = 'Entrando...';
-
-    try {
-      const d = await api('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({
-          email: $('#em').value.trim(),
-          password: $('#pw').value
-        })
-      });
-
-      localStorage.setItem('js_token', d.token);
-
-      location.hash = 'dashboard';
-
-    } catch (x) {
-      error.textContent = 'E-mail ou senha incorretos.';
+  const saveToken = value => {
+    if (value) {
+      localStorage.setItem(TOKEN_KEY, value);
     }
   };
-}
 
-/* =========================================================
-   REGISTRO
-========================================================= */
+  const logout = () => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem("jarastay_user");
+    location.hash = "login";
+    render();
+  };
 
-function register() {
-  document.querySelector('#app').innerHTML = `
-    <div class="login">
-      <form class="loginbox" id="registerForm">
+  /* =======================================================
+     API
+  ======================================================= */
 
-        <div class="logo" style="color:#14202b;margin:0 0 20px">
-          <span class="mark">JS</span>JaraStay
+  async function api(url, options = {}) {
+
+    const headers = {
+      Accept: "application/json",
+      ...(options.headers || {})
+    };
+
+    if (options.body && !headers["Content-Type"]) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    const currentToken = token();
+
+    if (currentToken) {
+      headers.Authorization = `Bearer ${currentToken}`;
+    }
+
+    let response;
+
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers
+      });
+    } catch (error) {
+      throw new Error(
+        "Não foi possível conectar ao servidor."
+      );
+    }
+
+    const text = await response.text();
+
+    let data = {};
+
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = {
+        raw: text
+      };
+    }
+
+    if (!response.ok) {
+
+      if (response.status === 401) {
+        localStorage.removeItem(TOKEN_KEY);
+      }
+
+      throw new Error(
+        data.error ||
+        data.message ||
+        `Erro ${response.status}`
+      );
+    }
+
+    return data;
+  }
+
+  /* =======================================================
+     ESTILO DA ÁREA DE AUTENTICAÇÃO
+  ======================================================= */
+
+  function authStyle() {
+
+    if (document.getElementById("jarastay-auth-style")) {
+      return;
+    }
+
+    const style = document.createElement("style");
+
+    style.id = "jarastay-auth-style";
+
+    style.textContent = `
+      .js-auth-page {
+        min-height:100vh;
+        min-height:100dvh;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding:20px;
+        background:
+          radial-gradient(
+            circle at top left,
+            rgba(37,99,235,.10),
+            transparent 35%
+          ),
+          #f5f7fa;
+      }
+
+      .js-auth-card {
+        width:100%;
+        max-width:430px;
+        background:#fff;
+        border:1px solid #e5e7eb;
+        border-radius:22px;
+        padding:30px;
+        box-shadow:0 20px 60px rgba(15,23,42,.10);
+      }
+
+      .js-logo {
+        display:flex;
+        align-items:center;
+        gap:10px;
+        font-size:22px;
+        font-weight:800;
+        margin-bottom:25px;
+      }
+
+      .js-logo-mark {
+        width:42px;
+        height:42px;
+        border-radius:12px;
+        display:grid;
+        place-items:center;
+        background:#111827;
+        color:#fff;
+        font-size:14px;
+        font-weight:900;
+      }
+
+      .js-auth-card h1 {
+        margin:0 0 7px;
+        font-size:28px;
+        color:#111827;
+      }
+
+      .js-auth-subtitle {
+        margin:0 0 25px;
+        color:#6b7280;
+        line-height:1.5;
+      }
+
+      .js-field {
+        margin-bottom:15px;
+      }
+
+      .js-field label {
+        display:block;
+        font-size:11px;
+        font-weight:800;
+        letter-spacing:.04em;
+        margin-bottom:7px;
+        color:#374151;
+      }
+
+      .js-field input {
+        width:100%;
+        box-sizing:border-box;
+        border:1px solid #d7dce3;
+        border-radius:11px;
+        padding:13px 14px;
+        font-size:15px;
+        outline:none;
+        background:#fff;
+      }
+
+      .js-field input:focus {
+        border-color:#2563eb;
+        box-shadow:0 0 0 3px rgba(37,99,235,.10);
+      }
+
+      .js-main-button {
+        width:100%;
+        border:0;
+        border-radius:11px;
+        padding:14px;
+        font-size:15px;
+        font-weight:800;
+        cursor:pointer;
+        background:#111827;
+        color:#fff;
+        margin-top:5px;
+      }
+
+      .js-main-button:disabled {
+        opacity:.6;
+        cursor:wait;
+      }
+
+      .js-secondary-button {
+        width:100%;
+        border:1px solid #d7dce3;
+        border-radius:11px;
+        padding:13px;
+        font-size:14px;
+        font-weight:700;
+        cursor:pointer;
+        background:#fff;
+        color:#111827;
+        margin-top:10px;
+      }
+
+      .js-auth-error {
+        min-height:20px;
+        margin:12px 0 0;
+        color:#b91c1c;
+        font-size:13px;
+        line-height:1.4;
+      }
+
+      .js-auth-success {
+        color:#047857;
+      }
+
+      .js-auth-footer {
+        text-align:center;
+        margin-top:20px;
+        color:#6b7280;
+        font-size:13px;
+      }
+
+      .js-link {
+        border:0;
+        background:none;
+        color:#2563eb;
+        font-weight:800;
+        cursor:pointer;
+        padding:0;
+      }
+
+      .js-password-help {
+        color:#6b7280;
+        font-size:11px;
+        margin-top:6px;
+      }
+
+      .js-loading {
+        min-height:100vh;
+        min-height:100dvh;
+        display:grid;
+        place-items:center;
+        font-family:system-ui,sans-serif;
+        color:#6b7280;
+      }
+
+      .js-dashboard {
+        min-height:100vh;
+        min-height:100dvh;
+        background:#f5f7fa;
+        font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      }
+
+      .js-dashboard-top {
+        background:#111827;
+        color:#fff;
+        padding:18px 20px;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:15px;
+        position:sticky;
+        top:0;
+        z-index:20;
+      }
+
+      .js-dashboard-brand {
+        display:flex;
+        align-items:center;
+        gap:10px;
+        font-weight:800;
+      }
+
+      .js-dashboard-mark {
+        width:36px;
+        height:36px;
+        border-radius:10px;
+        background:#fff;
+        color:#111827;
+        display:grid;
+        place-items:center;
+        font-size:12px;
+        font-weight:900;
+      }
+
+      .js-dashboard-user {
+        display:flex;
+        align-items:center;
+        gap:10px;
+      }
+
+      .js-logout {
+        border:1px solid rgba(255,255,255,.25);
+        background:transparent;
+        color:#fff;
+        border-radius:9px;
+        padding:8px 12px;
+        cursor:pointer;
+      }
+
+      .js-dashboard-body {
+        max-width:1250px;
+        margin:auto;
+        padding:24px;
+      }
+
+      .js-welcome {
+        margin-bottom:22px;
+      }
+
+      .js-welcome h1 {
+        margin:0 0 5px;
+        color:#111827;
+      }
+
+      .js-welcome p {
+        margin:0;
+        color:#6b7280;
+      }
+
+      .js-menu {
+        display:grid;
+        grid-template-columns:repeat(3,1fr);
+        gap:14px;
+      }
+
+      .js-menu-card {
+        border:1px solid #e5e7eb;
+        background:#fff;
+        border-radius:16px;
+        padding:20px;
+        text-align:left;
+        cursor:pointer;
+        transition:.15s;
+      }
+
+      .js-menu-card:hover {
+        transform:translateY(-2px);
+        box-shadow:0 10px 30px rgba(15,23,42,.08);
+      }
+
+      .js-menu-icon {
+        width:42px;
+        height:42px;
+        border-radius:11px;
+        background:#eef2ff;
+        display:grid;
+        place-items:center;
+        margin-bottom:12px;
+        font-weight:900;
+        color:#3730a3;
+      }
+
+      .js-menu-card h3 {
+        margin:0 0 5px;
+        color:#111827;
+      }
+
+      .js-menu-card p {
+        margin:0;
+        color:#6b7280;
+        font-size:13px;
+        line-height:1.4;
+      }
+
+      .js-panel {
+        margin-top:20px;
+        background:#fff;
+        border:1px solid #e5e7eb;
+        border-radius:16px;
+        padding:20px;
+      }
+
+      .js-panel h2 {
+        margin-top:0;
+      }
+
+      .js-stats {
+        display:grid;
+        grid-template-columns:repeat(4,1fr);
+        gap:12px;
+      }
+
+      .js-stat {
+        padding:18px;
+        border:1px solid #e5e7eb;
+        border-radius:14px;
+      }
+
+      .js-stat span {
+        display:block;
+        color:#6b7280;
+        font-size:12px;
+      }
+
+      .js-stat strong {
+        display:block;
+        font-size:24px;
+        margin-top:6px;
+        color:#111827;
+      }
+
+      .js-back {
+        border:1px solid #d7dce3;
+        background:#fff;
+        padding:10px 14px;
+        border-radius:9px;
+        cursor:pointer;
+        margin-bottom:15px;
+        font-weight:700;
+      }
+
+      .js-list {
+        display:grid;
+        gap:8px;
+      }
+
+      .js-list-item {
+        display:flex;
+        justify-content:space-between;
+        gap:10px;
+        padding:13px;
+        border:1px solid #e5e7eb;
+        border-radius:10px;
+      }
+
+      @media(max-width:800px) {
+        .js-menu {
+          grid-template-columns:1fr 1fr;
+        }
+
+        .js-stats {
+          grid-template-columns:1fr 1fr;
+        }
+      }
+
+      @media(max-width:520px) {
+        .js-auth-card {
+          padding:22px;
+        }
+
+        .js-dashboard-body {
+          padding:16px;
+        }
+
+        .js-menu {
+          grid-template-columns:1fr;
+        }
+
+        .js-stats {
+          grid-template-columns:1fr 1fr;
+        }
+
+        .js-dashboard-user span {
+          display:none;
+        }
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  /* =======================================================
+     LOGIN
+  ======================================================= */
+
+  function renderLogin() {
+
+    authStyle();
+
+    const app = document.getElementById("app");
+
+    if (!app) return;
+
+    app.innerHTML = `
+      <div class="js-auth-page">
+
+        <div class="js-auth-card">
+
+          <div class="js-logo">
+            <div class="js-logo-mark">JS</div>
+            <span>JaraStay</span>
+          </div>
+
+          <h1>Entrar</h1>
+
+          <p class="js-auth-subtitle">
+            Acesse o painel de gestão do seu hotel.
+          </p>
+
+          <form id="loginForm">
+
+            <div class="js-field">
+              <label>E-MAIL</label>
+              <input
+                id="loginEmail"
+                type="email"
+                autocomplete="email"
+                placeholder="seu@email.com"
+                required
+              >
+            </div>
+
+            <div class="js-field">
+              <label>SENHA</label>
+              <input
+                id="loginPassword"
+                type="password"
+                autocomplete="current-password"
+                placeholder="Sua senha"
+                required
+              >
+            </div>
+
+            <button
+              id="loginButton"
+              class="js-main-button"
+              type="submit"
+            >
+              Entrar no JaraStay
+            </button>
+
+            <p
+              id="loginError"
+              class="js-auth-error"
+            ></p>
+
+          </form>
+
+          <div class="js-auth-footer">
+
+            Ainda não possui uma conta?
+
+            <button
+              type="button"
+              id="goRegister"
+              class="js-link"
+            >
+              Criar conta
+            </button>
+
+          </div>
+
         </div>
 
-        <h1>Criar conta</h1>
+      </div>
+    `;
 
-        <p class="muted">
-          Crie a conta do proprietário para começar a utilizar o JaraStay.
-        </p>
+    $("#goRegister").addEventListener(
+      "click",
+      () => {
+        location.hash = "register";
+        render();
+      }
+    );
 
-        <div class="field">
-          <label>SEU NOME</label>
-          <input
-            id="regName"
-            type="text"
-            required
-            minlength="2"
-            autocomplete="name"
-            placeholder="Nome completo"
-          >
-        </div>
+    $("#loginForm").addEventListener(
+      "submit",
+      handleLogin
+    );
+  }
 
-        <div class="field">
-          <label>NOME DO HOTEL</label>
-          <input
-            id="regHotel"
-            type="text"
-            required
-            minlength="2"
-            autocomplete="organization"
-            placeholder="Ex.: Hotel JaraStay"
-          >
-        </div>
+  /* =======================================================
+     LOGIN - API
+  ======================================================= */
 
-        <div class="field">
-          <label>E-MAIL</label>
-          <input
-            id="regEmail"
-            type="email"
-            required
-            autocomplete="email"
-            placeholder="seu@email.com"
-          >
-        </div>
+  async function handleLogin(event) {
 
-        <div class="field">
-          <label>SENHA</label>
-          <input
-            id="regPassword"
-            type="password"
-            required
-            minlength="10"
-            autocomplete="new-password"
-            placeholder="Mínimo de 10 caracteres"
-          >
-        </div>
+    event.preventDefault();
 
-        <div class="field">
-          <label>CONFIRMAR SENHA</label>
-          <input
-            id="regPassword2"
-            type="password"
-            required
-            minlength="10"
-            autocomplete="new-password"
-            placeholder="Digite novamente"
-          >
-        </div>
+    const button = $("#loginButton");
+    const error = $("#loginError");
 
-        <button
-          class="btn primary"
-          style="width:100%;margin-top:10px"
-          id="registerButton"
-        >
-          Criar conta
-        </button>
+    const email =
+      $("#loginEmail").value.trim();
 
-        <p id="regErr" class="muted"></p>
+    const password =
+      $("#loginPassword").value;
 
-        <div style="text-align:center;margin-top:20px">
-          <span class="muted">Já possui uma conta?</span>
+    error.textContent = "";
+
+    button.disabled = true;
+    button.textContent = "Entrando...";
+
+    try {
+
+      const data = await api(
+        "/api/auth/login",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            email,
+            password
+          })
+        }
+      );
+
+      if (!data.token) {
+        throw new Error(
+          "O servidor não retornou um token de acesso."
+        );
+      }
+
+      saveToken(data.token);
+
+      if (data.user) {
+        localStorage.setItem(
+          "jarastay_user",
+          JSON.stringify(data.user)
+        );
+      }
+
+      location.hash = "dashboard";
+
+      render();
+
+    } catch (errorObject) {
+
+      console.error(errorObject);
+
+      error.textContent =
+        errorObject.message ||
+        "Não foi possível entrar.";
+
+      button.disabled = false;
+      button.textContent =
+        "Entrar no JaraStay";
+    }
+  }
+
+  /* =======================================================
+     REGISTRO
+  ======================================================= */
+
+  function renderRegister() {
+
+    authStyle();
+
+    const app = document.getElementById("app");
+
+    if (!app) return;
+
+    app.innerHTML = `
+      <div class="js-auth-page">
+
+        <div class="js-auth-card">
+
+          <div class="js-logo">
+            <div class="js-logo-mark">JS</div>
+            <span>JaraStay</span>
+          </div>
+
+          <h1>Criar sua conta</h1>
+
+          <p class="js-auth-subtitle">
+            Crie a conta do proprietário e cadastre seu hotel.
+          </p>
+
+          <form id="registerForm">
+
+            <div class="js-field">
+              <label>SEU NOME</label>
+
+              <input
+                id="registerName"
+                type="text"
+                autocomplete="name"
+                placeholder="Nome completo"
+                required
+              >
+            </div>
+
+            <div class="js-field">
+              <label>NOME DO HOTEL</label>
+
+              <input
+                id="registerHotel"
+                type="text"
+                autocomplete="organization"
+                placeholder="Ex.: Hotel Central"
+                required
+              >
+            </div>
+
+            <div class="js-field">
+              <label>E-MAIL</label>
+
+              <input
+                id="registerEmail"
+                type="email"
+                autocomplete="email"
+                placeholder="seu@email.com"
+                required
+              >
+            </div>
+
+            <div class="js-field">
+              <label>SENHA</label>
+
+              <input
+                id="registerPassword"
+                type="password"
+                autocomplete="new-password"
+                placeholder="Mínimo de 10 caracteres"
+                minlength="10"
+                required
+              >
+
+              <div class="js-password-help">
+                Use pelo menos 10 caracteres.
+              </div>
+            </div>
+
+            <div class="js-field">
+              <label>CONFIRMAR SENHA</label>
+
+              <input
+                id="registerPasswordConfirm"
+                type="password"
+                autocomplete="new-password"
+                placeholder="Digite a senha novamente"
+                minlength="10"
+                required
+              >
+            </div>
+
+            <button
+              id="registerButton"
+              class="js-main-button"
+              type="submit"
+            >
+              Criar conta e entrar
+            </button>
+
+            <p
+              id="registerError"
+              class="js-auth-error"
+            ></p>
+
+          </form>
 
           <button
             type="button"
-            class="btn"
-            onclick="location.hash='login'"
-            style="margin-top:10px;width:100%"
+            id="goLogin"
+            class="js-secondary-button"
           >
-            Voltar para login
+            Voltar para o login
           </button>
+
         </div>
 
-      </form>
-    </div>
-  `;
+      </div>
+    `;
 
-  $('#registerForm').onsubmit = async e => {
-    e.preventDefault();
+    $("#goLogin").addEventListener(
+      "click",
+      () => {
+        location.hash = "login";
+        render();
+      }
+    );
 
-    const name = $('#regName').value.trim();
-    const hotelName = $('#regHotel').value.trim();
-    const email = $('#regEmail').value.trim();
-    const password = $('#regPassword').value;
-    const password2 = $('#regPassword2').value;
+    $("#registerForm").addEventListener(
+      "submit",
+      handleRegister
+    );
+  }
 
-    const error = $('#regErr');
-    const button = $('#registerButton');
+  /* =======================================================
+     REGISTRO - API
+  ======================================================= */
 
-    error.textContent = '';
+  async function handleRegister(event) {
+
+    event.preventDefault();
+
+    const button =
+      $("#registerButton");
+
+    const error =
+      $("#registerError");
+
+    const name =
+      $("#registerName").value.trim();
+
+    const hotelName =
+      $("#registerHotel").value.trim();
+
+    const email =
+      $("#registerEmail").value.trim();
+
+    const password =
+      $("#registerPassword").value;
+
+    const confirmation =
+      $("#registerPasswordConfirm").value;
+
+    error.textContent = "";
 
     if (name.length < 2) {
-      error.textContent = 'Digite seu nome.';
+      error.textContent =
+        "Digite seu nome completo.";
+
       return;
     }
 
     if (hotelName.length < 2) {
-      error.textContent = 'Digite o nome do hotel.';
+      error.textContent =
+        "Digite o nome do hotel.";
+
       return;
     }
 
     if (password.length < 10) {
-      error.textContent = 'A senha precisa ter pelo menos 10 caracteres.';
+      error.textContent =
+        "A senha precisa ter pelo menos 10 caracteres.";
+
       return;
     }
 
-    if (password !== password2) {
-      error.textContent = 'As senhas não são iguais.';
+    if (password !== confirmation) {
+      error.textContent =
+        "As senhas não são iguais.";
+
       return;
     }
 
     button.disabled = true;
-    button.textContent = 'Criando conta...';
+    button.textContent =
+      "Criando sua conta...";
 
     try {
-      const d = await api('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({
-          name,
-          hotelName,
-          email,
-          password
-        })
-      });
 
-      if (!d.token) {
-        throw new Error('token_missing');
+      const data = await api(
+        "/api/auth/register",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name,
+            hotelName,
+            email,
+            password
+          })
+        }
+      );
+
+      if (!data.token) {
+        throw new Error(
+          "A conta foi processada, mas o servidor não retornou o token de acesso."
+        );
       }
 
-      localStorage.setItem('js_token', d.token);
+      saveToken(data.token);
 
-      location.hash = 'dashboard';
-
-    } catch (x) {
-      console.error(x);
-
-      if (x.message === 'registration_failed') {
-        error.textContent =
-          'Não foi possível criar a conta. Esse e-mail pode já estar cadastrado.';
-      } else {
-        error.textContent =
-          'Não foi possível criar a conta. Verifique os dados e tente novamente.';
+      if (data.user) {
+        localStorage.setItem(
+          "jarastay_user",
+          JSON.stringify(data.user)
+        );
       }
+
+      location.hash = "dashboard";
+
+      render();
+
+    } catch (errorObject) {
+
+      console.error(
+        "Erro no cadastro:",
+        errorObject
+      );
+
+      error.textContent =
+        errorObject.message ||
+        "Não foi possível criar a conta.";
 
       button.disabled = false;
-      button.textContent = 'Criar conta';
+
+      button.textContent =
+        "Criar conta e entrar";
     }
-  };
-}
+  }
 
-/* =========================================================
-   DASHBOARD
-========================================================= */
+  /* =======================================================
+     DASHBOARD
+  ======================================================= */
 
-async function dashboard() {
-  const d = await api('/api/dashboard');
+  async function renderDashboard() {
 
-  return `
-    <div class="top">
+    const app =
+      document.getElementById("app");
 
-      <div>
-        <h1>Visão geral</h1>
+    const user =
+      JSON.parse(
+        localStorage.getItem(
+          "jarastay_user"
+        ) || "null"
+      );
 
-        <div class="muted">
-          ${esc(d.property?.name || 'Seu hotel')}
-          • operação em tempo real
-        </div>
-      </div>
+    const userName =
+      user?.name ||
+      user?.full_name ||
+      "Administrador";
 
-      <button
-        class="btn primary"
-        onclick="openReservation()"
-      >
-        + Nova reserva
-      </button>
+    app.innerHTML = `
+      <div class="js-dashboard">
 
-    </div>
+        <header class="js-dashboard-top">
 
-    <div class="cards">
+          <div class="js-dashboard-brand">
 
-      <div class="card metric">
-        <span class="muted">Ocupação</span>
-
-        <b>
-          ${
-            d.rooms?.total
-              ? Math.round(
-                  d.rooms.occupied /
-                  d.rooms.total *
-                  100
-                )
-              : 0
-          }%
-        </b>
-
-        <span class="muted">
-          ${d.rooms?.occupied || 0} quartos ocupados
-        </span>
-      </div>
-
-      <div class="card metric">
-        <span class="muted">Receita do mês</span>
-
-        <b>
-          R$
-          ${Number(
-            d.ledgerIncome || 0
-          ).toLocaleString('pt-BR', {
-            minimumFractionDigits: 2
-          })}
-        </b>
-
-        <span class="muted">
-          Receitas lançadas
-        </span>
-      </div>
-
-      <div class="card metric">
-        <span class="muted">Check-ins hoje</span>
-
-        <b>
-          ${d.reservations?.arrivals || 0}
-        </b>
-
-        <span class="muted">
-          Chegadas previstas
-        </span>
-      </div>
-
-      <div class="card metric">
-        <span class="muted">Governança</span>
-
-        <b>
-          ${d.housekeeping?.pending || 0}
-        </b>
-
-        <span class="muted">
-          tarefas pendentes
-        </span>
-      </div>
-
-    </div>
-
-    <div class="grid">
-
-      <div class="card">
-
-        <div class="head">
-          <span>Inventário</span>
-
-          <span class="muted">
-            ${d.rooms?.total || 0} unidades
-          </span>
-        </div>
-
-        <div class="list">
-
-          ${[
-            ['Disponíveis', 'available'],
-            ['Ocupados', 'occupied'],
-            ['Limpeza', 'cleaning'],
-            ['Manutenção', 'maintenance']
-          ].map(x => `
-            <div class="row">
-              <span>${x[0]}</span>
-              <b>${d.rooms?.[x[1]] || 0}</b>
-            </div>
-          `).join('')}
-
-        </div>
-
-      </div>
-
-      <div class="card">
-
-        <div class="head">
-          <span>Hoje</span>
-        </div>
-
-        <div class="list">
-
-          <div class="row">
-            <span>Check-ins</span>
-            <b>${d.reservations?.arrivals || 0}</b>
-          </div>
-
-          <div class="row">
-            <span>Check-outs</span>
-            <b>${d.reservations?.departures || 0}</b>
-          </div>
-
-          <div class="row">
-            <span>Reservas ativas</span>
-            <b>${d.reservations?.active || 0}</b>
-          </div>
-
-          <div class="row">
-            <span>Hóspedes cadastrados</span>
-            <b>${d.guests || 0}</b>
-          </div>
-
-        </div>
-
-      </div>
-
-    </div>
-  `;
-}
-
-/* =========================================================
-   QUARTOS
-========================================================= */
-
-async function rooms() {
-  const r = await api('/api/rooms');
-
-  return `
-    <div class="top">
-
-      <div>
-        <h1>Quartos</h1>
-        <div class="muted">
-          Inventário operacional
-        </div>
-      </div>
-
-    </div>
-
-    <div class="card">
-
-      <div class="rooms">
-
-        ${r.map(x => `
-          <div class="room ${x.status}">
-
-            <b>${esc(x.number)}</b>
-
-            <div class="muted">
-              ${esc(x.room_type)}
+            <div class="js-dashboard-mark">
+              JS
             </div>
 
-            <div style="margin-top:9px">
-
-              <select
-                onchange="setRoom('${x.id}',this.value)"
-              >
-
-                <option
-                  value="available"
-                  ${x.status === 'available' ? 'selected' : ''}
-                >
-                  available
-                </option>
-
-                <option
-                  value="occupied"
-                  ${x.status === 'occupied' ? 'selected' : ''}
-                >
-                  occupied
-                </option>
-
-                <option
-                  value="cleaning"
-                  ${x.status === 'cleaning' ? 'selected' : ''}
-                >
-                  cleaning
-                </option>
-
-                <option
-                  value="maintenance"
-                  ${x.status === 'maintenance' ? 'selected' : ''}
-                >
-                  maintenance
-                </option>
-
-                <option
-                  value="blocked"
-                  ${x.status === 'blocked' ? 'selected' : ''}
-                >
-                  blocked
-                </option>
-
-              </select>
-
+            <div>
+              JaraStay
+              <small style="
+                display:block;
+                opacity:.6;
+                font-size:9px;
+              ">
+                HOTEL OPERATING SYSTEM
+              </small>
             </div>
 
           </div>
-        `).join('')}
 
-      </div>
-
-    </div>
-  `;
-}
-
-/* =========================================================
-   RESERVAS
-========================================================= */
-
-async function reservations() {
-  const r = await api('/api/reservations');
-
-  return `
-    <div class="top">
-
-      <div>
-        <h1>Reservas</h1>
-
-        <div class="muted">
-          Central de reservas
-        </div>
-      </div>
-
-      <button
-        class="btn primary"
-        onclick="openReservation()"
-      >
-        + Nova reserva
-      </button>
-
-    </div>
-
-    <div class="card">
-
-      <div class="toolbar">
-
-        <input
-          class="search"
-          id="rsearch"
-          placeholder="Buscar..."
-          oninput="loadReservations()"
-        >
-
-      </div>
-
-      <div class="wrap">
-
-        <table class="table">
-
-          <thead>
-
-            <tr>
-              <th>Código</th>
-              <th>Hóspede</th>
-              <th>Quarto</th>
-              <th>Entrada</th>
-              <th>Saída</th>
-              <th>Valor</th>
-              <th>Status</th>
-            </tr>
-
-          </thead>
-
-          <tbody>
-
-            ${r.map(x => `
-              <tr>
-
-                <td>
-                  <b>${esc(x.confirmation_code)}</b>
-                </td>
-
-                <td>
-                  ${esc(x.guest_name)}
-                </td>
-
-                <td>
-                  ${esc(x.room_number || '—')}
-                </td>
-
-                <td>
-                  ${x.check_in}
-                </td>
-
-                <td>
-                  ${x.check_out}
-                </td>
-
-                <td>
-                  R$
-                  ${Number(x.total).toLocaleString('pt-BR', {
-                    minimumFractionDigits: 2
-                  })}
-                </td>
-
-                <td>
-
-                  <span class="pill ${
-                    x.status === 'cancelled'
-                      ? 'red'
-                      : x.status === 'checked_in'
-                        ? 'green'
-                        : ''
-                  }">
-
-                    ${esc(x.status)}
-
-                  </span>
-
-                </td>
-
-              </tr>
-            `).join('')}
-
-          </tbody>
-
-        </table>
-
-      </div>
-
-    </div>
-  `;
-}
-
-async function loadReservations() {
-  const q = $('#rsearch')?.value || '';
-
-  const r = await api(
-    '/api/reservations?q=' +
-    encodeURIComponent(q)
-  );
-
-  const body = $('.table tbody');
-
-  if (!body) return;
-
-  body.innerHTML = r.map(x => `
-    <tr>
-
-      <td>
-        <b>${esc(x.confirmation_code)}</b>
-      </td>
-
-      <td>
-        ${esc(x.guest_name)}
-      </td>
-
-      <td>
-        ${esc(x.room_number || '—')}
-      </td>
-
-      <td>${x.check_in}</td>
-      <td>${x.check_out}</td>
-
-      <td>
-        R$
-        ${Number(x.total).toLocaleString('pt-BR', {
-          minimumFractionDigits: 2
-        })}
-      </td>
-
-      <td>
-        <span class="pill">
-          ${esc(x.status)}
-        </span>
-      </td>
-
-    </tr>
-  `).join('');
-}
-
-/* =========================================================
-   HÓSPEDES
-========================================================= */
-
-async function guests() {
-  const r = await api('/api/guests');
-
-  return `
-    <div class="top">
-
-      <div>
-        <h1>Hóspedes</h1>
-
-        <div class="muted">
-          CRM e cadastro
-        </div>
-      </div>
-
-      <button
-        class="btn primary"
-        onclick="openGuest()"
-      >
-        + Novo hóspede
-      </button>
-
-    </div>
-
-    <div class="card">
-
-      <div class="wrap">
-
-        <table class="table">
-
-          <thead>
-
-            <tr>
-              <th>Nome</th>
-              <th>E-mail</th>
-              <th>Telefone</th>
-              <th>Marketing</th>
-              <th>Criado</th>
-            </tr>
-
-          </thead>
-
-          <tbody>
-
-            ${r.map(x => `
-              <tr>
-
-                <td>
-                  <b>${esc(x.full_name)}</b>
-                </td>
-
-                <td>
-                  ${esc(x.email || '—')}
-                </td>
-
-                <td>
-                  ${esc(x.phone || '—')}
-                </td>
-
-                <td>
-                  ${x.marketing_opt_in ? 'Sim' : 'Não'}
-                </td>
-
-                <td>
-                  ${new Date(
-                    x.created_at
-                  ).toLocaleDateString('pt-BR')}
-                </td>
-
-              </tr>
-            `).join('')}
-
-          </tbody>
-
-        </table>
-
-      </div>
-
-    </div>
-  `;
-}
-
-/* =========================================================
-   GOVERNANÇA
-========================================================= */
-
-async function housekeeping() {
-  const r = await api('/api/housekeeping');
-
-  return `
-    <div class="top">
-
-      <div>
-        <h1>Governança</h1>
-
-        <div class="muted">
-          Limpeza e manutenção
-        </div>
-      </div>
-
-    </div>
-
-    <div class="card">
-
-      <div class="list">
-
-        ${r.map(x => `
-          <div class="row">
+          <div class="js-dashboard-user">
 
             <span>
-
-              <b>
-                Quarto ${esc(x.room_number || '—')}
-              </b>
-
-              <small
-                class="muted"
-                style="display:block"
-              >
-                ${esc(x.type)}
-                •
-                ${esc(x.priority)}
-              </small>
-
+              ${escapeHtml(userName)}
             </span>
 
             <button
-              class="btn"
-              onclick="task(
-                '${x.id}',
-                '${x.status === 'completed'
-                  ? 'pending'
-                  : 'completed'}'
-              )"
+              id="logoutButton"
+              class="js-logout"
             >
-
-              ${
-                x.status === 'completed'
-                  ? 'Reabrir'
-                  : 'Concluir'
-              }
-
+              Sair
             </button>
 
           </div>
-        `).join('')}
+
+        </header>
+
+        <main class="js-dashboard-body">
+
+          <div class="js-welcome">
+
+            <h1>
+              Olá, ${escapeHtml(userName)}.
+            </h1>
+
+            <p>
+              Bem-vindo ao painel do JaraStay.
+            </p>
+
+          </div>
+
+          <div
+            id="dashboardContent"
+          >
+            <div class="js-loading">
+              Carregando dados do hotel...
+            </div>
+          </div>
+
+        </main>
 
       </div>
-
-    </div>
-  `;
-}
-
-/* =========================================================
-   FINANCEIRO
-========================================================= */
-
-async function finance() {
-  const r = await api('/api/finance/ledger');
-
-  const income = r
-    .filter(x => x.kind === 'income')
-    .reduce((a, x) => a + Number(x.amount), 0);
-
-  const expense = r
-    .filter(x => x.kind === 'expense')
-    .reduce((a, x) => a + Number(x.amount), 0);
-
-  return `
-    <div class="top">
-
-      <div>
-        <h1>Financeiro</h1>
-
-        <div class="muted">
-          Livro caixa e resultados
-        </div>
-      </div>
-
-      <button
-        class="btn primary"
-        onclick="openFinance()"
-      >
-        + Lançamento
-      </button>
-
-    </div>
-
-    <div class="cards">
-
-      <div class="card metric">
-        <span class="muted">Receitas</span>
-
-        <b>
-          R$
-          ${income.toLocaleString('pt-BR', {
-            minimumFractionDigits: 2
-          })}
-        </b>
-      </div>
-
-      <div class="card metric">
-        <span class="muted">Despesas</span>
-
-        <b>
-          R$
-          ${expense.toLocaleString('pt-BR', {
-            minimumFractionDigits: 2
-          })}
-        </b>
-      </div>
-
-      <div class="card metric">
-        <span class="muted">Resultado</span>
-
-        <b>
-          R$
-          ${(income - expense).toLocaleString('pt-BR', {
-            minimumFractionDigits: 2
-          })}
-        </b>
-      </div>
-
-      <div class="card metric">
-        <span class="muted">Lançamentos</span>
-
-        <b>
-          ${r.length}
-        </b>
-      </div>
-
-    </div>
-
-    <div
-      class="card"
-      style="margin-top:14px"
-    >
-
-      <div class="wrap">
-
-        <table class="table">
-
-          <thead>
-
-            <tr>
-              <th>Data</th>
-              <th>Tipo</th>
-              <th>Categoria</th>
-              <th>Descrição</th>
-              <th>Valor</th>
-            </tr>
-
-          </thead>
-
-          <tbody>
-
-            ${r.map(x => `
-              <tr>
-
-                <td>
-                  ${x.occurred_on}
-                </td>
-
-                <td>
-                  ${esc(x.kind)}
-                </td>
-
-                <td>
-                  ${esc(x.category)}
-                </td>
-
-                <td>
-                  ${esc(x.description)}
-                </td>
-
-                <td>
-                  R$
-                  ${Number(x.amount).toLocaleString('pt-BR', {
-                    minimumFractionDigits: 2
-                  })}
-                </td>
-
-              </tr>
-            `).join('')}
-
-          </tbody>
-
-        </table>
-
-      </div>
-
-    </div>
-  `;
-}
-
-/* =========================================================
-   MODAL - HÓSPEDE
-========================================================= */
-
-function openGuest() {
-  modal(`
-    <h2>Novo hóspede</h2>
-
-    <form class="form" id="gf">
-
-      <div class="field full">
-        <label>NOME COMPLETO</label>
-        <input
-          name="fullName"
-          required
-        >
-      </div>
-
-      <div class="field">
-        <label>E-MAIL</label>
-        <input
-          name="email"
-          type="email"
-        >
-      </div>
-
-      <div class="field">
-        <label>TELEFONE</label>
-        <input
-          name="phone"
-        >
-      </div>
-
-    </form>
-
-    <div class="modalfoot">
-
-      <button
-        class="btn"
-        onclick="closeModal()"
-      >
-        Cancelar
-      </button>
-
-      <button
-        class="btn primary"
-        onclick="saveGuest()"
-      >
-        Salvar
-      </button>
-
-    </div>
-  `);
-}
-
-async function saveGuest() {
-  const f = new FormData($('#gf'));
-
-  try {
-
-    await api('/api/guests', {
-      method: 'POST',
-      body: JSON.stringify(
-        Object.fromEntries(f)
-      )
-    });
-
-    closeModal();
-    navigate('guests');
-
-  } catch (e) {
-    alert(e.message);
-  }
-}
-
-/* =========================================================
-   QUARTOS
-========================================================= */
-
-async function setRoom(id, status) {
-  try {
-
-    await api('/api/rooms/' + id, {
-      method: 'PATCH',
-      body: JSON.stringify({ status })
-    });
-
-    navigate('rooms');
-
-  } catch (e) {
-    alert(e.message);
-  }
-}
-
-/* =========================================================
-   GOVERNANÇA
-========================================================= */
-
-async function task(id, status) {
-
-  try {
-
-    await api('/api/housekeeping/' + id, {
-      method: 'PATCH',
-      body: JSON.stringify({ status })
-    });
-
-    navigate('housekeeping');
-
-  } catch (e) {
-    alert(e.message);
-  }
-}
-
-/* =========================================================
-   FINANCEIRO
-========================================================= */
-
-function openFinance() {
-  modal(`
-    <h2>Lançamento financeiro</h2>
-
-    <form class="form" id="ff">
-
-      <div class="field">
-        <label>TIPO</label>
-
-        <select name="kind">
-          <option value="income">
-            Receita
-          </option>
-
-          <option value="expense">
-            Despesa
-          </option>
-        </select>
-
-      </div>
-
-      <div class="field">
-        <label>VALOR</label>
-
-        <input
-          name="amount"
-          type="number"
-          step=".01"
-          required
-        >
-      </div>
-
-      <div class="field">
-        <label>CATEGORIA</label>
-
-        <input
-          name="category"
-          required
-        >
-      </div>
-
-      <div class="field">
-        <label>DESCRIÇÃO</label>
-
-        <input
-          name="description"
-          required
-        >
-      </div>
-
-    </form>
-
-    <div class="modalfoot">
-
-      <button
-        class="btn"
-        onclick="closeModal()"
-      >
-        Cancelar
-      </button>
-
-      <button
-        class="btn primary"
-        onclick="saveFinance()"
-      >
-        Salvar
-      </button>
-
-    </div>
-  `);
-}
-
-async function saveFinance() {
-  const f = Object.fromEntries(
-    new FormData($('#ff'))
-  );
-
-  try {
-
-    await api('/api/finance/ledger', {
-      method: 'POST',
-      body: JSON.stringify(f)
-    });
-
-    closeModal();
-    navigate('finance');
-
-  } catch (e) {
-    alert(e.message);
-  }
-}
-
-/* =========================================================
-   RESERVA
-========================================================= */
-
-async function openReservation() {
-
-  const rooms = await api('/api/rooms');
-  const guests = await api('/api/guests');
-  const props = await api('/api/properties');
-
-  const availableRooms =
-    rooms.filter(
-      r => r.status === 'available'
+    `;
+
+    $("#logoutButton").addEventListener(
+      "click",
+      logout
     );
 
-  if (!guests.length) {
-    alert(
-      'Cadastre pelo menos um hóspede antes de criar uma reserva.'
-    );
-
-    return;
+    await loadDashboardData();
   }
 
-  if (!availableRooms.length) {
-    alert(
-      'Não existem quartos disponíveis.'
-    );
+  /* =======================================================
+     DADOS DO DASHBOARD
+  ======================================================= */
 
-    return;
-  }
+  async function loadDashboardData() {
 
-  modal(`
-    <h2>Nova reserva</h2>
+    const container =
+      $("#dashboardContent");
 
-    <form class="form" id="rf">
+    try {
 
-      <input
-        type="hidden"
-        name="propertyId"
-        value="${props[0]?.id || ''}"
-      >
+      const data =
+        await api("/api/dashboard");
 
-      <div class="field full">
+      const rooms =
+        data.rooms || {};
 
-        <label>HÓSPEDE</label>
+      const reservations =
+        data.reservations || {};
 
-        <select
-          name="guestId"
-          required
-        >
+      container.innerHTML = `
 
-          ${guests.map(g => `
-            <option value="${g.id}">
-              ${esc(g.full_name)}
-            </option>
-          `).join('')}
+        <div class="js-stats">
 
-        </select>
+          <div class="js-stat">
+            <span>Ocupação</span>
 
-      </div>
+            <strong>
+              ${
+                rooms.total
+                  ? Math.round(
+                      (
+                        Number(rooms.occupied || 0) /
+                        Number(rooms.total)
+                      ) * 100
+                    )
+                  : 0
+              }%
+            </strong>
+          </div>
 
-      <div class="field">
+          <div class="js-stat">
+            <span>Quartos</span>
 
-        <label>QUARTO</label>
+            <strong>
+              ${rooms.total || 0}
+            </strong>
+          </div>
 
-        <select
-          name="roomId"
-          required
-        >
+          <div class="js-stat">
+            <span>Check-ins hoje</span>
 
-          ${availableRooms.map(r => `
-            <option
-              value="${r.id}"
-              data-rate="${r.base_rate}"
-            >
-              ${esc(r.number)}
-              •
-              ${esc(r.room_type)}
-              •
-              R$ ${Number(r.base_rate).toFixed(2)}
-            </option>
-          `).join('')}
+            <strong>
+              ${reservations.arrivals || 0}
+            </strong>
+          </div>
 
-        </select>
+          <div class="js-stat">
+            <span>Reservas ativas</span>
 
-      </div>
-
-      <div class="field">
-
-        <label>VALOR</label>
-
-        <input
-          name="rate"
-          type="number"
-          step=".01"
-          value="${availableRooms[0]?.base_rate || 0}"
-          required
-        >
-
-      </div>
-
-      <div class="field">
-
-        <label>CHECK-IN</label>
-
-        <input
-          name="checkIn"
-          type="date"
-          required
-        >
-
-      </div>
-
-      <div class="field">
-
-        <label>CHECK-OUT</label>
-
-        <input
-          name="checkOut"
-          type="date"
-          required
-        >
-
-      </div>
-
-      <div class="field">
-
-        <label>ADULTOS</label>
-
-        <input
-          name="adults"
-          type="number"
-          value="1"
-          min="1"
-        >
-
-      </div>
-
-    </form>
-
-    <div class="modalfoot">
-
-      <button
-        class="btn"
-        onclick="closeModal()"
-      >
-        Cancelar
-      </button>
-
-      <button
-        class="btn primary"
-        onclick="saveReservation()"
-      >
-        Criar
-      </button>
-
-    </div>
-  `);
-
-  $('#rf select[name="roomId"]').onchange = e => {
-
-    $('#rf input[name="rate"]').value =
-      e.target.selectedOptions[0]?.dataset.rate || 0;
-
-  };
-}
-
-async function saveReservation() {
-
-  const f = Object.fromEntries(
-    new FormData($('#rf'))
-  );
-
-  try {
-
-    await api('/api/reservations', {
-      method: 'POST',
-      body: JSON.stringify(f)
-    });
-
-    closeModal();
-    navigate('reservations');
-
-  } catch (e) {
-    alert(e.message);
-  }
-}
-
-/* =========================================================
-   MODAL
-========================================================= */
-
-function modal(html) {
-
-  $('#modal')?.remove();
-
-  document.body.insertAdjacentHTML(
-    'beforeend',
-    `
-      <div
-        class="modal open"
-        id="modal"
-      >
-
-        <div class="modalbox">
-
-          <div class="head">
-            ${html}
+            <strong>
+              ${reservations.active || 0}
+            </strong>
           </div>
 
         </div>
 
-      </div>
-    `
-  );
-}
+        ${dashboardMenu()}
 
-function closeModal() {
-  $('#modal')?.remove();
-}
+      `;
 
-/* =========================================================
-   NAVEGAÇÃO
-========================================================= */
+      bindDashboardMenu();
 
-async function navigate(page) {
+    } catch (errorObject) {
 
-  const views = {
-    dashboard,
-    rooms,
-    reservations,
-    guests,
-    housekeeping,
-    finance
-  };
+      console.error(
+        "Dashboard:",
+        errorObject
+      );
 
-  if (!views[page]) {
-    page = 'dashboard';
+      container.innerHTML = `
+
+        <div class="js-panel">
+
+          <h2>
+            JaraStay
+          </h2>
+
+          <p style="color:#6b7280">
+            Sua conta foi criada e o login está funcionando.
+          </p>
+
+          <p style="
+            color:#b45309;
+            font-size:13px;
+          ">
+            O painel foi carregado, mas a API de
+            dashboard ainda não respondeu.
+          </p>
+
+          ${dashboardMenu()}
+
+        </div>
+
+      `;
+
+      bindDashboardMenu();
+    }
   }
 
-  try {
+  /* =======================================================
+     MENU REAL
+  ======================================================= */
 
-    document.querySelector('#view').innerHTML =
-      await views[page]();
+  function dashboardMenu() {
 
-    document
-      .querySelectorAll('.nav button')
-      .forEach(b => {
-        b.classList.toggle(
-          'on',
-          b.dataset.page === page
-        );
-      });
+    return `
 
-    location.hash = page;
-
-  } catch (e) {
-
-    console.error(e);
-
-    document.querySelector('#view').innerHTML = `
-      <div class="card">
-
-        <h2>Erro ao carregar</h2>
-
-        <p class="muted">
-          Não foi possível carregar esta seção.
-        </p>
+      <div class="js-menu" style="margin-top:20px">
 
         <button
-          class="btn primary"
-          onclick="navigate('dashboard')"
+          class="js-menu-card"
+          data-module="reservas"
         >
-          Voltar
+          <div class="js-menu-icon">
+            R
+          </div>
+
+          <h3>Reservas</h3>
+
+          <p>
+            Gerencie reservas, check-ins e check-outs.
+          </p>
+        </button>
+
+        <button
+          class="js-menu-card"
+          data-module="quartos"
+        >
+          <div class="js-menu-icon">
+            Q
+          </div>
+
+          <h3>Quartos</h3>
+
+          <p>
+            Veja disponibilidade e ocupação.
+          </p>
+        </button>
+
+        <button
+          class="js-menu-card"
+          data-module="hospedes"
+        >
+          <div class="js-menu-icon">
+            H
+          </div>
+
+          <h3>Hóspedes</h3>
+
+          <p>
+            Cadastro e relacionamento com hóspedes.
+          </p>
+        </button>
+
+        <button
+          class="js-menu-card"
+          data-module="governanca"
+        >
+          <div class="js-menu-icon">
+            G
+          </div>
+
+          <h3>Governança</h3>
+
+          <p>
+            Limpeza, manutenção e tarefas.
+          </p>
+        </button>
+
+        <button
+          class="js-menu-card"
+          data-module="financeiro"
+        >
+          <div class="js-menu-icon">
+            R$
+          </div>
+
+          <h3>Financeiro</h3>
+
+          <p>
+            Receitas, despesas e resultados.
+          </p>
+        </button>
+
+        <button
+          class="js-menu-card"
+          data-module="config"
+        >
+          <div class="js-menu-icon">
+            ⚙
+          </div>
+
+          <h3>Configurações</h3>
+
+          <p>
+            Configurações da operação.
+          </p>
         </button>
 
       </div>
     `;
   }
-}
 
-/* =========================================================
-   APP PRINCIPAL
-========================================================= */
+  function bindDashboardMenu() {
 
-async function app() {
+    document
+      .querySelectorAll("[data-module]")
+      .forEach(button => {
 
-  const hash =
-    location.hash.slice(1) || 'dashboard';
+        button.addEventListener(
+          "click",
+          () => {
 
-  if (hash === 'register') {
-    register();
-    return;
+            const module =
+              button.dataset.module;
+
+            openModule(module);
+          }
+        );
+
+      });
   }
 
-  if (!localStorage.getItem('js_token')) {
-    login();
-    return;
-  }
+  /* =======================================================
+     MÓDULOS
+  ======================================================= */
 
-  document.querySelector('#app').innerHTML = `
-    <div class="shell">
+  async function openModule(module) {
 
-      <aside class="side">
+    const container =
+      $("#dashboardContent");
 
-        <div class="logo">
-          <span class="mark">JS</span>
-          JaraStay
-        </div>
+    const names = {
+      reservas: "Reservas",
+      quartos: "Quartos",
+      hospedes: "Hóspedes",
+      governanca: "Governança",
+      financeiro: "Financeiro",
+      config: "Configurações"
+    };
 
-        <nav class="nav">
+    container.innerHTML = `
 
-          <button data-page="dashboard">
-            Visão geral
-          </button>
-
-          <button data-page="reservations">
-            Reservas
-          </button>
-
-          <button data-page="rooms">
-            Quartos
-          </button>
-
-          <button data-page="guests">
-            Hóspedes
-          </button>
-
-          <button data-page="housekeeping">
-            Governança
-          </button>
-
-          <button data-page="finance">
-            Financeiro
-          </button>
-
-        </nav>
+      <div class="js-panel">
 
         <button
-          class="btn"
-          style="
-            position:absolute;
-            bottom:20px;
-            left:14px;
-            right:14px
-          "
-          onclick="
-            localStorage.removeItem('js_token');
-            location.hash='login';
-            location.reload();
-          "
+          id="backDashboard"
+          class="js-back"
         >
-          Sair
+          ← Voltar
         </button>
 
-      </aside>
+        <h2>
+          ${escapeHtml(names[module] || module)}
+        </h2>
 
-      <main class="main">
+        <div id="moduleContent">
+          Carregando...
+        </div>
 
-        <header>
+      </div>
+    `;
 
-          <b>Hotel OS</b>
+    $("#backDashboard").addEventListener(
+      "click",
+      loadDashboardData
+    );
 
-          <span class="muted">
-            Produção • protegido
-          </span>
+    try {
 
-        </header>
+      if (module === "reservas") {
+        await loadReservations();
+        return;
+      }
 
-        <section
-          class="content"
-          id="view"
-        ></section>
+      if (module === "quartos") {
+        await loadRooms();
+        return;
+      }
 
-      </main>
+      if (module === "hospedes") {
+        await loadGuests();
+        return;
+      }
 
-    </div>
-  `;
+      if (module === "governanca") {
+        await loadHousekeeping();
+        return;
+      }
 
-  document
-    .querySelectorAll('.nav button')
-    .forEach(b => {
-      b.onclick = () =>
-        navigate(b.dataset.page);
-    });
+      if (module === "financeiro") {
+        await loadFinance();
+        return;
+      }
 
-  await navigate(hash);
-}
+      $("#moduleContent").innerHTML = `
+        <p style="color:#6b7280">
+          Configurações do hotel.
+        </p>
+      `;
 
-/* =========================================================
-   HASH
-========================================================= */
+    } catch (errorObject) {
 
-window.addEventListener(
-  'hashchange',
-  () => {
+      $("#moduleContent").innerHTML = `
+        <p style="color:#b91c1c">
+          ${escapeHtml(errorObject.message)}
+        </p>
+      `;
+    }
+  }
 
-    const hash =
-      location.hash.slice(1);
+  /* =======================================================
+     RESERVAS
+  ======================================================= */
 
-    if (hash === 'login') {
-      login();
+  async function loadReservations() {
+
+    const data =
+      await api("/api/reservations");
+
+    const list =
+      Array.isArray(data)
+        ? data
+        : data.reservations || [];
+
+    $("#moduleContent").innerHTML = `
+
+      <div class="js-list">
+
+        ${
+          list.length
+            ? list.map(item => `
+                <div class="js-list-item">
+
+                  <div>
+                    <strong>
+                      ${escapeHtml(
+                        item.guest_name ||
+                        item.guestName ||
+                        "Hóspede"
+                      )}
+                    </strong>
+
+                    <small style="
+                      display:block;
+                      color:#6b7280;
+                    ">
+                      Quarto ${
+                        escapeHtml(
+                          item.room_number ||
+                          item.roomNumber ||
+                          "—"
+                        )
+                      }
+                    </small>
+                  </div>
+
+                  <strong>
+                    ${money(item.total)}
+                  </strong>
+
+                </div>
+              `).join("")
+            : `
+              <p style="color:#6b7280">
+                Nenhuma reserva cadastrada.
+              </p>
+            `
+        }
+
+      </div>
+    `;
+  }
+
+  /* =======================================================
+     QUARTOS
+  ======================================================= */
+
+  async function loadRooms() {
+
+    const data =
+      await api("/api/rooms");
+
+    const list =
+      Array.isArray(data)
+        ? data
+        : data.rooms || [];
+
+    $("#moduleContent").innerHTML = `
+
+      <div class="js-list">
+
+        ${
+          list.length
+            ? list.map(room => `
+                <div class="js-list-item">
+
+                  <div>
+                    <strong>
+                      Quarto ${escapeHtml(room.number)}
+                    </strong>
+
+                    <small style="
+                      display:block;
+                      color:#6b7280;
+                    ">
+                      ${escapeHtml(
+                        room.room_type ||
+                        room.type ||
+                        "Quarto"
+                      )}
+                    </small>
+                  </div>
+
+                  <strong>
+                    ${escapeHtml(room.status || "—")}
+                  </strong>
+
+                </div>
+              `).join("")
+            : `
+              <p style="color:#6b7280">
+                Nenhum quarto cadastrado.
+              </p>
+            `
+        }
+
+      </div>
+    `;
+  }
+
+  /* =======================================================
+     HÓSPEDES
+  ======================================================= */
+
+  async function loadGuests() {
+
+    const data =
+      await api("/api/guests");
+
+    const list =
+      Array.isArray(data)
+        ? data
+        : data.guests || [];
+
+    $("#moduleContent").innerHTML = `
+
+      <div class="js-list">
+
+        ${
+          list.length
+            ? list.map(guest => `
+                <div class="js-list-item">
+
+                  <div>
+                    <strong>
+                      ${escapeHtml(
+                        guest.full_name ||
+                        guest.name ||
+                        "Hóspede"
+                      )}
+                    </strong>
+
+                    <small style="
+                      display:block;
+                      color:#6b7280;
+                    ">
+                      ${escapeHtml(
+                        guest.email ||
+                        guest.phone ||
+                        "Sem contato"
+                      )}
+                    </small>
+                  </div>
+
+                </div>
+              `).join("")
+            : `
+              <p style="color:#6b7280">
+                Nenhum hóspede cadastrado.
+              </p>
+            `
+        }
+
+      </div>
+    `;
+  }
+
+  /* =======================================================
+     GOVERNANÇA
+  ======================================================= */
+
+  async function loadHousekeeping() {
+
+    const data =
+      await api("/api/housekeeping");
+
+    const list =
+      Array.isArray(data)
+        ? data
+        : data.tasks || [];
+
+    $("#moduleContent").innerHTML = `
+
+      <div class="js-list">
+
+        ${
+          list.length
+            ? list.map(task => `
+                <div class="js-list-item">
+
+                  <div>
+                    <strong>
+                      Quarto ${
+                        escapeHtml(
+                          task.room_number ||
+                          task.room ||
+                          "—"
+                        )
+                      }
+                    </strong>
+
+                    <small style="
+                      display:block;
+                      color:#6b7280;
+                    ">
+                      ${escapeHtml(
+                        task.type ||
+                        task.description ||
+                        "Tarefa"
+                      )}
+                    </small>
+                  </div>
+
+                  <strong>
+                    ${escapeHtml(task.status || "—")}
+                  </strong>
+
+                </div>
+              `).join("")
+            : `
+              <p style="color:#6b7280">
+                Nenhuma tarefa cadastrada.
+              </p>
+            `
+        }
+
+      </div>
+    `;
+  }
+
+  /* =======================================================
+     FINANCEIRO
+  ======================================================= */
+
+  async function loadFinance() {
+
+    const data =
+      await api("/api/finance/ledger");
+
+    const list =
+      Array.isArray(data)
+        ? data
+        : data.ledger || [];
+
+    $("#moduleContent").innerHTML = `
+
+      <div class="js-list">
+
+        ${
+          list.length
+            ? list.map(item => `
+                <div class="js-list-item">
+
+                  <div>
+                    <strong>
+                      ${escapeHtml(
+                        item.description ||
+                        item.category ||
+                        "Lançamento"
+                      )}
+                    </strong>
+
+                    <small style="
+                      display:block;
+                      color:#6b7280;
+                    ">
+                      ${escapeHtml(
+                        item.kind ||
+                        "movimentação"
+                      )}
+                    </small>
+                  </div>
+
+                  <strong>
+                    ${money(item.amount)}
+                  </strong>
+
+                </div>
+              `).join("")
+            : `
+              <p style="color:#6b7280">
+                Nenhum lançamento financeiro.
+              </p>
+            `
+        }
+
+      </div>
+    `;
+  }
+
+  /* =======================================================
+     RENDER PRINCIPAL
+  ======================================================= */
+
+  async function render() {
+
+    const app =
+      document.getElementById("app");
+
+    if (!app) {
+      console.error(
+        "JaraStay: #app não encontrado."
+      );
       return;
     }
 
-    if (hash === 'register') {
-      register();
+    if (!token()) {
+
+      if (
+        location.hash !== "#register" &&
+        location.hash !== "#login"
+      ) {
+        location.hash = "login";
+      }
+
+      if (
+        location.hash === "#register"
+      ) {
+        renderRegister();
+      } else {
+        renderLogin();
+      }
+
       return;
     }
 
-    if (localStorage.getItem('js_token')) {
-      navigate(hash || 'dashboard');
-    }
+    location.hash = "dashboard";
+
+    await renderDashboard();
+  }
+
+  /* =======================================================
+     NAVEGAÇÃO POR HASH
+  ======================================================= */
+
+  window.addEventListener(
+    "hashchange",
+    () => render()
+  );
+
+  /* =======================================================
+     INÍCIO
+  ======================================================= */
+
+  if (
+    document.readyState === "loading"
+  ) {
+
+    document.addEventListener(
+      "DOMContentLoaded",
+      render
+    );
+
+  } else {
+
+    render();
 
   }
-);
 
-/* =========================================================
-   INICIALIZAÇÃO
-========================================================= */
-
-app();
+})();
