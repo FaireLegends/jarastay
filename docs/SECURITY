@@ -1,0 +1,12 @@
+# Segurança
+
+- Senhas usam scrypt com salt individual.
+- Tokens são JWT HS256 assinados no servidor.
+- API é multi-tenant: consultas são filtradas pelo organization_id do token.
+- RBAC básico restringe operações financeiras e auditoria.
+- Headers de segurança e CSP são enviados pelo servidor.
+- Rate limit simples por IP está ativo; em produção, substitua por Redis/WAF para ambiente distribuído.
+- Não coloque segredos no frontend.
+- Para pagamentos, nunca processe cartão diretamente: use tokenização/checkout hospedado do provedor.
+- Adicione CSRF se autenticação por cookie for adotada.
+- Faça rotação de chaves e sessões antes de operação em escala
