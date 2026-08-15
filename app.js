@@ -1,3 +1,4 @@
+alert("JARASTAY APP.JS CARREGOU");
 /* =========================================================
    JARASTAY - APP.JS
    Login + Registro + Painel real
